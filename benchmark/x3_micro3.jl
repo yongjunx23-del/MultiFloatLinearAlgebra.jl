@@ -5,6 +5,7 @@ using Random
 
 Random.seed!(20260812)
 const T = Float64x3
+const V4 = MultiFloatVec{4,Float64,3}
 
 function median_seconds(function_call, samples)
     count = max(Int(samples), 1)
@@ -18,6 +19,146 @@ function median_seconds(function_call, samples)
     end
     sort!(elapsed)
     return elapsed[cld(count, 2)]
+end
+
+@inline function micro3_vector!(
+    C,
+    A,
+    packed_b,
+    width,
+    row,
+    local_column,
+    global_column,
+)
+    accumulator1 = zero(V4)
+    accumulator2 = zero(V4)
+    accumulator3 = zero(V4)
+    reduction = size(A, 2)
+    @inbounds for k in 1:reduction
+        values = V4(
+            A[row, k],
+            A[row + 1, k],
+            A[row + 2, k],
+            A[row + 3, k],
+        )
+        offset = (k - 1) * width + local_column
+        accumulator1 += values * V4(packed_b[offset])
+        accumulator2 += values * V4(packed_b[offset + 1])
+        accumulator3 += values * V4(packed_b[offset + 2])
+    end
+    @inbounds for lane in 1:4
+        output_row = row + lane - 1
+        C[output_row, global_column] = accumulator1[lane]
+        C[output_row, global_column + 1] = accumulator2[lane]
+        C[output_row, global_column + 2] = accumulator3[lane]
+    end
+    return nothing
+end
+
+@inline function micro3_scalar!(
+    C,
+    A,
+    packed_b,
+    width,
+    row,
+    local_column,
+    global_column,
+)
+    accumulator1 = zero(T)
+    accumulator2 = zero(T)
+    accumulator3 = zero(T)
+    reduction = size(A, 2)
+    @inbounds for k in 1:reduction
+        value = A[row, k]
+        offset = (k - 1) * width + local_column
+        accumulator1 += value * packed_b[offset]
+        accumulator2 += value * packed_b[offset + 1]
+        accumulator3 += value * packed_b[offset + 2]
+    end
+    C[row, global_column] = accumulator1
+    C[row, global_column + 1] = accumulator2
+    C[row, global_column + 2] = accumulator3
+    return nothing
+end
+
+function column_group3!(
+    C,
+    A,
+    packed_b,
+    width,
+    local_column,
+    global_column,
+)
+    m = size(A, 1)
+    row = 1
+    @inbounds while row + 3 <= m
+        micro3_vector!(
+            C,
+            A,
+            packed_b,
+            width,
+            row,
+            local_column,
+            global_column,
+        )
+        row += 4
+    end
+    while row <= m
+        micro3_scalar!(
+            C,
+            A,
+            packed_b,
+            width,
+            row,
+            local_column,
+            global_column,
+        )
+        row += 1
+    end
+    return nothing
+end
+
+function panel3!(C, A, packed_b, first_column, width)
+    local_column = 1
+    while local_column + 2 <= width
+        column_group3!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+        )
+        local_column += 3
+    end
+    while local_column + 1 <= width
+        MultiFloatLinearAlgebra._packed_gemm_column_group!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+            one(T),
+            zero(T),
+            Val(2),
+        )
+        local_column += 2
+    end
+    if local_column <= width
+        MultiFloatLinearAlgebra._packed_gemm_column_group!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+            one(T),
+            zero(T),
+            Val(1),
+        )
+    end
+    return C
 end
 
 function packed3!(C, A, B, panel_columns)
@@ -35,16 +176,7 @@ function packed3!(C, A, B, panel_columns)
             width = MultiFloatLinearAlgebra._pack_b_panel!(
                 buffer, B, first_column, last_column,
             )
-            MultiFloatLinearAlgebra._packed_gemm_panel_nr!(
-                C,
-                A,
-                buffer,
-                first_column,
-                width,
-                one(T),
-                zero(T),
-                Val(3),
-            )
+            panel3!(C, A, buffer, first_column, width)
         end
         return nothing
     end
@@ -111,7 +243,7 @@ function main()
     end
     baseline == direct || error("32x2 packed baseline changed the direct result")
 
-    println("Float64x3 three-column GEMM microkernel experiment")
+    println("Float64x3 straight-line three-column GEMM microkernel experiment")
     println("threads=$(Threads.nthreads()), n=$n, samples=$samples")
     report("direct-32x2", n, direct_seconds, direct_seconds)
     report("packed-32x2", n, baseline_seconds, direct_seconds)
