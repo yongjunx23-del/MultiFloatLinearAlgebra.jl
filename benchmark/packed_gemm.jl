@@ -43,12 +43,14 @@ function benchmark_type(::Type{T}, n, samples, include_generic) where {T}
     Cpacked = zeros(T, n, n)
     Cauto = zeros(T, n, n)
     threads = Threads.nthreads()
+    calibration_sizes = (256, min(n, 512))
 
     calibration = calibrate_gemm(
         T;
-        sizes=(128, 256),
+        sizes=calibration_sizes,
         samples=1,
         thread_count=threads,
+        minimum_speedup=1.05,
     )
     profile = calibration.profile
     direct_config = KernelConfig(
@@ -76,7 +78,9 @@ function benchmark_type(::Type{T}, n, samples, include_generic) where {T}
     println(
         "profile $T: source=$(profile.source), strategy=$(profile.strategy), " *
         "panel=$(profile.panel_columns), micro=$(profile.micro_columns), " *
-        "crossover=$(profile.packed_crossover), fingerprint=$(profile.fingerprint)",
+        "crossover=$(profile.packed_crossover), " *
+        "minimum_speedup=$(calibration.minimum_speedup), " *
+        "calibration_sizes=$calibration_sizes, fingerprint=$(profile.fingerprint)",
     )
 
     direct_seconds = median_seconds(samples) do
