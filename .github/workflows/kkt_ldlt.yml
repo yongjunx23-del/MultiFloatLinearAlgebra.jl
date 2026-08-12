@@ -1,0 +1,23 @@
+name: KKT LDLT Benchmark
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  kkt-ldlt:
+    strategy:
+      fail-fast: false
+      matrix:
+        size: [512, 1024]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate benchmark environment
+        run: julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+      - name: Run saddle-point KKT benchmark
+        run: julia -t 4 --project=benchmark benchmark/kkt_ldlt.jl ${{ matrix.size }}
