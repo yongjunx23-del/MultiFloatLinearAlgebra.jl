@@ -5,6 +5,7 @@ on:
     paths:
       - "benchmark/arithmetic_profile.jl"
       - "benchmark/accumulator_pressure.jl"
+      - "benchmark/ordered_twosum.jl"
       - ".github/workflows/arithmetic-profile.yml"
   workflow_dispatch:
 
@@ -30,11 +31,17 @@ jobs:
         env:
           MFLA_PRESSURE_OUT: accumulator-codegen
         run: julia -t 1 --project=benchmark benchmark/accumulator_pressure.jl 2048 16 5 | tee accumulator-pressure.txt
+      - name: Test magnitude-ordered FastTwoSum network
+        env:
+          MFLA_ORDERED_OUT: ordered-twosum-codegen
+        run: julia -t 1 --project=benchmark benchmark/ordered_twosum.jl | tee ordered-twosum.txt
       - uses: actions/upload-artifact@v4
         with:
           name: arithmetic-profile
           path: |
             arithmetic-profile.txt
             accumulator-pressure.txt
+            ordered-twosum.txt
             arithmetic-codegen/
             accumulator-codegen/
+            ordered-twosum-codegen/
