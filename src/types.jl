@@ -1,6 +1,6 @@
 """
     KernelConfig(; reduction_tile=64, column_tile=16, cholesky_block=16,
-                 thread_count=Threads.nthreads())
+                 lu_block=16, thread_count=Threads.nthreads())
 
 Cache/thread geometry for MultiFloat kernels.
 
@@ -12,6 +12,7 @@ Base.@kwdef struct KernelConfig
     reduction_tile::Int = 64
     column_tile::Int = 16
     cholesky_block::Int = 16
+    lu_block::Int = 16
     thread_count::Int = Threads.nthreads()
 end
 

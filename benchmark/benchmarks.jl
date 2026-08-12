@@ -35,6 +35,17 @@ function make_spd(::Type{T}, n) where {T}
     return T.(A)
 end
 
+function make_lower(::Type{T}, n) where {T}
+    L = zeros(T, n, n)
+    @inbounds for column in 1:n
+        for row in column:n
+            L[row, column] = T(randn())
+        end
+        L[column, column] += T(4)
+    end
+    return L
+end
+
 function benchmark_gemm(::Type{T}, n, config) where {T}
     A = T.(randn(n, n))
     B = T.(randn(n, n))
@@ -54,6 +65,26 @@ function benchmark_gemm(::Type{T}, n, config) where {T}
     report_row("GEMM", string(T), "MFLA", n, tb, tg)
 end
 
+function benchmark_trsm(::Type{T}, n, config) where {T}
+    L = make_lower(T, n)
+    rhs_columns = min(32, n)
+    rhs = T.(randn(n, rhs_columns))
+    Ltri = LowerTriangular(L)
+
+    generic = @benchmark LinearAlgebra.ldiv!(
+        $Ltri, X,
+    ) setup=(X=copy($rhs)) samples=5 evals=1
+    backend = @benchmark MultiFloatLinearAlgebra.trsm!(
+        X, $L; side=:left, uplo=:lower, trans=:N,
+        diag=:nonunit, config=$config,
+    ) setup=(X=copy($rhs)) samples=5 evals=1
+
+    tg = median_seconds(generic)
+    tb = median_seconds(backend)
+    report_row("TRSM", string(T), "LinearAlgebra", n, tg)
+    report_row("TRSM", string(T), "MFLA", n, tb, tg)
+end
+
 function benchmark_cholesky(::Type{T}, n, config) where {T}
     A = make_spd(T, n)
 
@@ -71,7 +102,7 @@ function benchmark_cholesky(::Type{T}, n, config) where {T}
     report_row("CHOLESKY", string(T), "MFLA", n, tb, tg)
 end
 
-function benchmark_lu(::Type{T}, n) where {T}
+function benchmark_lu(::Type{T}, n, config) where {T}
     A = T.(randn(n, n))
     @inbounds for i in 1:n
         A[i, i] += T(4)
@@ -82,13 +113,26 @@ function benchmark_lu(::Type{T}, n) where {T}
     ) setup=(X=copy($A)) samples=5 evals=1
 
     backend = @benchmark MultiFloatLinearAlgebra.lu!(
-        X; check=false,
+        X; check=false, config=$config,
     ) setup=(X=copy($A)) samples=5 evals=1
 
     tg = median_seconds(generic)
     tb = median_seconds(backend)
     report_row("LU", string(T), "LinearAlgebra", n, tg)
     report_row("LU", string(T), "MFLA", n, tb, tg)
+end
+
+function benchmark_ldlt(::Type{T}, n) where {T}
+    R = randn(n, n)
+    A64 = 0.02 .* (R + transpose(R))
+    @inbounds for i in 1:n
+        A64[i, i] += isodd(i) ? n : -n
+    end
+    A = T.(Matrix(A64))
+    trial = @benchmark MultiFloatLinearAlgebra.ldlt!(
+        X; check=false,
+    ) setup=(X=copy($A)) samples=5 evals=1
+    report_row("LDLT", string(T), "MFLA", n, median_seconds(trial))
 end
 
 function benchmark_float64(n)
@@ -125,10 +169,12 @@ function main()
     end
     println()
 
-    factor_n = min(n, 128)
+    factor_n = min(n, 256)
     for T in TYPES
+        benchmark_trsm(T, factor_n, config)
         benchmark_cholesky(T, factor_n, config)
-        benchmark_lu(T, factor_n)
+        benchmark_lu(T, factor_n, config)
+        benchmark_ldlt(T, min(factor_n, 128))
     end
 
     if "--bigfloat" in ARGS
