@@ -41,8 +41,20 @@ function gemm_plan(
 ) where {MF<:MultiFloat}
     _check_supported(MF)
     strategy = config.gemm_strategy
-    strategy in (:auto, :direct, :packed) ||
-        throw(ArgumentError("gemm_strategy must be :auto, :direct, or :packed"))
+    strategy in (:auto, :direct, :packed, :fused) ||
+        throw(ArgumentError("gemm_strategy must be :auto, :direct, :packed, or :fused"))
+
+    if strategy === :fused
+        _limb_count(MF) == 3 ||
+            throw(ArgumentError("gemm_strategy=:fused is only available for Float64x3"))
+        panel_columns = config.gemm_panel_columns > 0 ?
+                        config.gemm_panel_columns :
+                        _default_gemm_panel_columns(MF, config.thread_count)
+        panel_columns = max(panel_columns, 1)
+        jobs = cld(max(n, 0), panel_columns)
+        workers = _workers(config, jobs)
+        return GemmPlan(:fused, :forced_fused, panel_columns, 2, workers, 0)
+    end
 
     panel_columns = config.gemm_panel_columns > 0 ?
                     config.gemm_panel_columns :
@@ -247,6 +259,90 @@ function _gemm_direct!(
                     first_column,
                     last_column,
                 )
+            end
+        end
+    end
+    return C
+end
+
+# ---------------------------------------------------------------------------
+# Fused x3 direct GEMM
+# ---------------------------------------------------------------------------
+
+@inline function _gemm_store_pair_fused!(
+    C::AbstractMatrix{MultiFloat{Float64,3}},
+    A::AbstractMatrix{MultiFloat{Float64,3}},
+    B::AbstractMatrix{MultiFloat{Float64,3}},
+    row::Int,
+    column::Int,
+    alpha::MultiFloat{Float64,3},
+    beta::MultiFloat{Float64,3},
+)
+    V3 = MultiFloatVec{4,Float64,3}
+    first_accumulator = zero(V3)
+    second_accumulator = zero(V3)
+    @inbounds for k in axes(A, 2)
+        values = V3(
+            A[row, k],
+            A[row + 1, k],
+            A[row + 2, k],
+            A[row + 3, k],
+        )
+        first_accumulator = mulacc_x3(first_accumulator, values, V3(B[k, column]))
+        second_accumulator = mulacc_x3(second_accumulator, values, V3(B[k, column + 1]))
+    end
+
+    first_result = V3(alpha) * first_accumulator + V3(beta) * V3(
+        C[row, column],
+        C[row + 1, column],
+        C[row + 2, column],
+        C[row + 3, column],
+    )
+    second_result = V3(alpha) * second_accumulator + V3(beta) * V3(
+        C[row, column + 1],
+        C[row + 1, column + 1],
+        C[row + 2, column + 1],
+        C[row + 3, column + 1],
+    )
+    @inbounds for lane in 1:4
+        C[row + lane - 1, column] = first_result[lane]
+        C[row + lane - 1, column + 1] = second_result[lane]
+    end
+    return nothing
+end
+
+function _gemm_direct_fused!(
+    C::AbstractMatrix{MultiFloat{Float64,3}},
+    A::AbstractMatrix{MultiFloat{Float64,3}},
+    B::AbstractMatrix{MultiFloat{Float64,3}},
+    alpha::MultiFloat{Float64,3},
+    beta::MultiFloat{Float64,3},
+    plan::GemmPlan,
+)
+    m = size(A, 1)
+    n = size(B, 2)
+    jobs = cld(n, plan.panel_columns)
+    workers = plan.workers
+
+    run = function (first_column, last_column)
+        @inbounds for column in first_column:2:(last_column - 1)
+            for row in 1:4:(m - 3)
+                _gemm_store_pair_fused!(C, A, B, row, column, alpha, beta)
+            end
+        end
+    end
+
+    if workers == 1 || jobs <= 1
+        run(1, n)
+        return C
+    end
+
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            for job in worker:workers:jobs
+                first_column = (job - 1) * plan.panel_columns + 1
+                last_column = min(job * plan.panel_columns, n)
+                run(first_column, last_column)
             end
         end
     end
@@ -503,6 +599,12 @@ function gemm!(
     plan = gemm_plan(MF, m, k, n, config)
     if plan.strategy === :packed
         return _gemm_packed!(C, A, B, alpha, beta, plan, workspace)
+    elseif plan.strategy === :fused
+        if m % 4 == 0 && n % 2 == 0
+            return _gemm_direct_fused!(C, A, B, alpha, beta, plan)
+        end
+        # Non-fusable shape falls back to the standard direct kernel.
+        return _gemm_direct!(C, A, B, alpha, beta, plan)
     end
     return _gemm_direct!(C, A, B, alpha, beta, plan)
 end

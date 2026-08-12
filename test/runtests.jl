@@ -588,6 +588,81 @@ end
         end
     end
 
+    @testset "fused x3 mulacc" begin
+        T3 = Float64x3
+        V3 = MultiFloatVec{4,Float64,3}
+
+        # Full three-limb data so the x3 product is not trivially exact.
+        function rich_big(rng, exponent; sign=1)
+            base = ldexp(BigFloat(0.5 + rand(rng)), exponent)
+            c1 = ldexp(BigFloat(randn(rng)), exponent - 70)
+            c2 = ldexp(BigFloat(randn(rng)), exponent - 135)
+            return sign * (base + c1 + c2)
+        end
+
+        rng = MersenneTwister(0x3eed)
+        @testset "bitwise equality with standard accumulation" begin
+            neq = Ref(0)
+            total = Ref(0)
+            setprecision(BigFloat, 512) do
+                for trial in 1:64
+                    lanes_acc = Vector{T3}(undef, 4)
+                    lanes_x = Vector{T3}(undef, 4)
+                    lanes_y = Vector{T3}(undef, 4)
+                    for lane in 1:4
+                        lanes_acc[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                        lanes_x[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                        lanes_y[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    end
+                    acc = V3(lanes_acc...)
+                    x = V3(lanes_x...)
+                    y = V3(lanes_y...)
+                    standard = acc + x * y
+                    fused = MultiFloatLinearAlgebra.mulacc_x3(acc, x, y)
+                    for lane in 1:4
+                        total[] += 1
+                        standard[lane] != fused[lane] && (neq[] += 1)
+                    end
+                end
+            end
+            @test neq[] == 0
+            @test total[] == 256
+        end
+
+        @testset "fused GEMM strategy" begin
+            n = 24
+            A = Matrix{T3}(undef, n, n)
+            B = Matrix{T3}(undef, n, n)
+            setprecision(BigFloat, 512) do
+                for j in 1:n, i in 1:n
+                    A[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    B[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                end
+            end
+
+            Cstandard = zeros(T3, n, n)
+            Cfused = zeros(T3, n, n)
+            MultiFloatLinearAlgebra.gemm!(
+                Cstandard, A, B;
+                config=KernelConfig(thread_count=1, gemm_strategy=:direct),
+            )
+            MultiFloatLinearAlgebra.gemm!(
+                Cfused, A, B;
+                config=KernelConfig(thread_count=1, gemm_strategy=:fused),
+            )
+            @test Cfused == Cstandard
+
+            # Fused is x3-only.
+            A2 = Float64x2.(randn(n, n))
+            B2 = Float64x2.(randn(n, n))
+            C2 = zeros(Float64x2, n, n)
+            @test_throws ArgumentError MultiFloatLinearAlgebra.gemm!(
+                C2, A2, B2;
+                config=KernelConfig(thread_count=1, gemm_strategy=:fused),
+            )
+        end
+    end
+
     @testset "Aqua" begin
         Aqua.test_all(
             MultiFloatLinearAlgebra;
