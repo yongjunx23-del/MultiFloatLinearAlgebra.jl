@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "benchmark/arithmetic_profile.jl"
+      - "benchmark/accumulator_pressure.jl"
       - ".github/workflows/arithmetic-profile.yml"
   workflow_dispatch:
 
@@ -25,9 +26,15 @@ jobs:
         env:
           MFLA_PROFILE_OUT: arithmetic-codegen
         run: julia -t 1 --project=benchmark benchmark/arithmetic_profile.jl 4096 16 5 | tee arithmetic-profile.txt
+      - name: Profile GEMM accumulator pressure
+        env:
+          MFLA_PRESSURE_OUT: accumulator-codegen
+        run: julia -t 1 --project=benchmark benchmark/accumulator_pressure.jl 2048 16 5 | tee accumulator-pressure.txt
       - uses: actions/upload-artifact@v4
         with:
           name: arithmetic-profile
           path: |
             arithmetic-profile.txt
+            accumulator-pressure.txt
             arithmetic-codegen/
+            accumulator-codegen/
