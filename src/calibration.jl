@@ -1,8 +1,19 @@
+function _cpu_model_fingerprint()
+    info = try
+        Sys.cpu_info()
+    catch
+        return "unknown"
+    end
+    isempty(info) && return "unknown"
+    return string(first(info).model)
+end
+
 function machine_fingerprint(; thread_count::Int=Threads.nthreads())
     return (
         arch=Sys.ARCH,
         kernel=Sys.KERNEL,
         word_size=Sys.WORD_SIZE,
+        cpu_model=_cpu_model_fingerprint(),
         julia=VERSION,
         julia_threads=max(thread_count, 1),
     )
