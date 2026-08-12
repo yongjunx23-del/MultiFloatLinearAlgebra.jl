@@ -94,5 +94,7 @@ function ldiv!(
     return destination
 end
 
-solve(F::Union{MFCholesky,MFLU}, rhs::AbstractVecOrMat) =
+solve(F::Union{MFCholesky,MFLU}, rhs::AbstractVector) =
+    ldiv!(copy(rhs), F)
+solve(F::Union{MFCholesky,MFLU}, rhs::AbstractMatrix) =
     ldiv!(copy(rhs), F)
