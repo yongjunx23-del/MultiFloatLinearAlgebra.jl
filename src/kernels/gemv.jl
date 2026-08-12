@@ -57,6 +57,7 @@ function gemv!(
     length(x) == n || throw(DimensionMismatch("gemv! input length differs"))
     length(y) == m || throw(DimensionMismatch("gemv! output length differs"))
     _check_supported(MF)
+    Base.require_one_based_indexing(y, A, x)
 
     workers = _workers(config, cld(m, 32))
     if workers == 1 || m < 64

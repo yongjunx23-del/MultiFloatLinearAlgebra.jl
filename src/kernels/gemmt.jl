@@ -73,6 +73,7 @@ function gemmt!(
     size(output) == (rows, rows) ||
         throw(DimensionMismatch("gemmt! output dimensions differ"))
     _check_supported(MF)
+    Base.require_one_based_indexing(output, left, right)
 
     workers = _workers(config, rows)
     if workers == 1 || rows < 24

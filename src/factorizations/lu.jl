@@ -1,10 +1,12 @@
-struct MFLU{MF<:MultiFloat,M<:AbstractMatrix{MF}}
+struct MFLU{MF<:MultiFloat,M<:AbstractMatrix{MF}} <: AbstractMFFactorization{MF}
     factors::M
     ipiv::Vector{Int}
     info::Int
 end
 
-issuccess(F::MFLU) = iszero(F.info)
+factor_kind(::MFLU) = :lu
+factor_status(F::MFLU) = F.info
+factor_matrix(F::MFLU) = F.factors
 
 @inline function _swap_rows!(
     A::AbstractMatrix,
@@ -105,6 +107,7 @@ function lu!(
 ) where {MF<:MultiFloat}
     m, n = size(A)
     _check_supported(MF)
+    Base.require_one_based_indexing(A)
     kmax = min(m, n)
     if !_all_finite(A)
         check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))

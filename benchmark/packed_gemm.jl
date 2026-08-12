@@ -70,7 +70,7 @@ function benchmark_type(::Type{T}, n, samples, include_generic) where {T}
 
     println(
         "candidate $T: panel=$panel_columns, micro=$micro_columns, " *
-        "fingerprint=$(machine_fingerprint(; thread_count=threads))",
+        "fingerprint=$(machine_fingerprint())",
     )
 
     direct_seconds = median_seconds(samples) do

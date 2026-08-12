@@ -16,6 +16,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     n = size(F.factors, 1)
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
@@ -48,6 +49,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     size(destination, 1) == size(F.factors, 1) ||
         throw(DimensionMismatch("right-hand side dimensions differ"))
     trsm!(
@@ -107,6 +109,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     A = F.factors
     n, m = size(A)
     n == m || throw(DimensionMismatch("solve requires a square LU factor"))
@@ -142,6 +145,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     n, m = size(F.factors)
     n == m || throw(DimensionMismatch("solve requires a square LU factor"))
     size(destination, 1) == n ||
@@ -285,6 +289,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     n = size(F.factors, 1)
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
@@ -321,6 +326,7 @@ function ldiv!(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    Base.require_one_based_indexing(destination, F.factors)
     size(destination, 1) == size(F.factors, 1) ||
         throw(DimensionMismatch("right-hand side dimensions differ"))
     _apply_ldlt_pivots_forward!(destination, F)

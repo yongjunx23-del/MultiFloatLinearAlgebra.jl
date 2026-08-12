@@ -120,7 +120,28 @@ end
                 plan = gemm_plan(T, 256, 256, 256, resolved)
                 @test plan.strategy in (:direct, :packed)
                 @test builtin.source === :builtin
-                @test builtin.fingerprint.julia_threads == 2
+                @test builtin.thread_count == min(2, Threads.nthreads())
+                @test builtin.fingerprint.julia_threads_available == Threads.nthreads()
+                @test profile_compatible(builtin)
+
+                mismatched = GemmProfile{T}(
+                    :auto,
+                    builtin.panel_columns,
+                    builtin.micro_columns,
+                    builtin.packed_crossover,
+                    builtin.thread_count,
+                    :builtin,
+                    merge(
+                        builtin.fingerprint,
+                        (; cpu_model="definitely-not-this-machine"),
+                    ),
+                )
+                @test !profile_compatible(mismatched)
+                @test_throws ArgumentError with_gemm_profile(config, mismatched)
+                forced = with_gemm_profile(
+                    config, mismatched; strict=false,
+                )
+                @test forced.gemm_strategy === mismatched.strategy
 
                 calibration = calibrate_gemm(
                     T;
@@ -133,6 +154,42 @@ end
                 @test length(calibration.measurements) == 3
                 @test calibration.profile.panel_columns == 4
                 @test calibration.profile.micro_columns in (2, 4)
+            end
+
+            @testset "near-square auto policy" begin
+                profile = GemmProfile{T}(
+                    :auto,
+                    16,
+                    2,
+                    8,
+                    1,
+                    :calibrated,
+                    machine_fingerprint(),
+                )
+                cfg = with_gemm_profile(config, profile)
+                square = gemm_plan(T, 64, 64, 64, cfg)
+                tall = gemm_plan(T, 4096, 64, 64, cfg)
+                reduction = gemm_plan(T, 32, 16, 32, cfg)
+                @test square.strategy === :packed
+                @test square.reason === :auto_above_crossover
+                @test tall.strategy === :direct
+                @test tall.reason === :auto_outside_calibrated_shape
+                @test reduction.strategy === :direct
+                @test reduction.reason === :auto_reduction_too_small
+
+                large_crossover = GemmProfile{T}(
+                    :auto,
+                    16,
+                    2,
+                    512,
+                    1,
+                    :calibrated,
+                    machine_fingerprint(),
+                )
+                large_cfg = with_gemm_profile(config, large_crossover)
+                below = gemm_plan(T, 256, 256, 256, large_cfg)
+                @test below.strategy === :direct
+                @test below.reason === :auto_below_crossover
             end
 
             @testset "syrk!" begin
@@ -498,13 +555,43 @@ end
                 )
                 @test zv == vec(zm)
             end
+
+            @testset "factor public protocol" begin
+                R = randn(n, n)
+                S = R * transpose(R) + n * I
+                Fc = MultiFloatLinearAlgebra.cholesky!(T.(Matrix(S)); config=config)
+                @test Fc isa MultiFloatLinearAlgebra.AbstractMFFactorization
+                @test MultiFloatLinearAlgebra.factor_kind(Fc) === :cholesky
+                @test MultiFloatLinearAlgebra.factor_status(Fc) == 0
+                @test MultiFloatLinearAlgebra.factor_matrix(Fc) === Fc.factors
+                @test size(Fc) == (n, n)
+                @test eltype(Fc) === T
+
+                Alu = T.(randn(n, n))
+                for i in 1:n
+                    Alu[i, i] += T(4)
+                end
+                Flu = MultiFloatLinearAlgebra.lu!(Alu; config=config)
+                @test MultiFloatLinearAlgebra.factor_kind(Flu) === :lu
+                @test size(Flu) == (n, n)
+
+                Rind = randn(n, n)
+                Sind = Rind + transpose(Rind)
+                for i in 1:n
+                    Sind[i, i] += isodd(i) ? 5 : -5
+                end
+                Fld = MultiFloatLinearAlgebra.ldlt!(T.(Matrix(Sind)); config=config)
+                @test MultiFloatLinearAlgebra.factor_kind(Fld) === :ldlt
+                @test MultiFloatLinearAlgebra.factor_status(Fld) == 0
+                @test eltype(Fld) === T
+            end
         end
     end
 
     @testset "Aqua" begin
         Aqua.test_all(
             MultiFloatLinearAlgebra;
-            piracies=false,
+            piracies=true,
             stale_deps=true,
             deps_compat=true,
         )

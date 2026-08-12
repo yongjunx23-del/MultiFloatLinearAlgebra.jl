@@ -1,9 +1,11 @@
-struct MFCholesky{MF<:MultiFloat,M<:AbstractMatrix{MF}}
+struct MFCholesky{MF<:MultiFloat,M<:AbstractMatrix{MF}} <: AbstractMFFactorization{MF}
     factors::M
     info::Int
 end
 
-issuccess(F::MFCholesky) = iszero(F.info)
+factor_kind(::MFCholesky) = :cholesky
+factor_status(F::MFCholesky) = F.info
+factor_matrix(F::MFCholesky) = F.factors
 
 function _factor_cholesky_panel!(
     A::AbstractMatrix{MF},
@@ -71,6 +73,7 @@ function cholesky!(
     n, m = size(A)
     n == m || throw(DimensionMismatch("cholesky! requires a square matrix"))
     _check_supported(MF)
+    Base.require_one_based_indexing(A)
     if !_lower_triangle_finite(A)
         check && throw(DomainError(A, "cholesky!: input matrix contains non-finite entries"))
         return MFCholesky{MF,typeof(A)}(A, -1)

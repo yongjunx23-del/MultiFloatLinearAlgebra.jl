@@ -68,6 +68,7 @@ function syrk!(
     size(output) == (columns, columns) ||
         throw(DimensionMismatch("syrk! output dimensions differ"))
     _check_supported(MF)
+    Base.require_one_based_indexing(output, panel)
 
     workers = _workers(config, columns)
     if workers == 1 || columns < 24

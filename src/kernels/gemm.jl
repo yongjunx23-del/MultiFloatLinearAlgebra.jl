@@ -12,6 +12,11 @@ end
     return N <= 3 ? 4 : 2
 end
 
+@inline function _near_square_shape(m::Int, k::Int, n::Int, ratio::Int=4)
+    all(dim -> dim > 0, (m, k, n)) || return false
+    return maximum((m, k, n)) <= ratio * minimum((m, k, n))
+end
+
 """
     gemm_plan(T, m, k, n, config=KernelConfig())
 
@@ -20,10 +25,12 @@ it uses the stored crossover and the type-specific panel/microkernel defaults.
 Use `calibrate_gemm` to produce a machine-specific profile explicitly.
 
 `gemm_packed_crossover` is expressed as an equivalent square edge length: the
-packed route is eligible once the total `m*k*n` work reaches `crossover^3` and
-the reduction dimension `k` is at least half that edge. This keeps the same
-threshold for square GEMM (`m == k == n`) while scaling sensibly for tall or
-wide shapes.
+packed route is eligible once the total `m*k*n` work reaches `crossover^3`, the
+reduction dimension `k` is at least half that edge, and the shape is near-square
+(no dimension more than four times another). Calibration only measures square
+GEMM, so the calibrated `:auto` route is intentionally restricted to near-square
+shapes; strongly tall or wide GEMM stays on the direct route until shape-aware
+calibration exists.
 """
 function gemm_plan(
     ::Type{MF},
@@ -76,13 +83,19 @@ function gemm_plan(
     crossover = max(config.gemm_packed_crossover, 1)
     work = Float64(max(m, 0)) * Float64(max(k, 0)) * Float64(max(n, 0))
     minimum_reduction = max(32, crossover ÷ 2)
-    use_packed =
-        k >= minimum_reduction &&
-        n >= micro_columns &&
-        work >= Float64(crossover)^3
+    reason = if !_near_square_shape(m, k, n)
+        :auto_outside_calibrated_shape
+    elseif k < minimum_reduction
+        :auto_reduction_too_small
+    elseif work < Float64(crossover)^3
+        :auto_below_crossover
+    else
+        :auto_above_crossover
+    end
+    use_packed = reason === :auto_above_crossover
     return GemmPlan(
         use_packed ? :packed : :direct,
-        use_packed ? :auto_above_crossover : :auto_below_crossover,
+        reason,
         panel_columns,
         micro_columns,
         workers,
@@ -467,6 +480,9 @@ uses four SIMD row lanes and two output columns. The packed route stores each
 B panel in reduction-major order, then reuses every A lane load across a
 2- or 4-column register microkernel. Output-column panels have disjoint task
 ownership. Passing `GemmWorkspace` removes repeated packing-buffer allocation.
+
+The kernel requires one-based indexing and does not support aliasing: `C` must
+not share storage with `A` or `B`.
 """
 function gemm!(
     C::AbstractMatrix{MF},
@@ -482,6 +498,7 @@ function gemm!(
     n = size(B, 2)
     size(C) == (m, n) || throw(DimensionMismatch("gemm! output dimensions differ"))
     _check_supported(MF)
+    Base.require_one_based_indexing(C, A, B)
 
     plan = gemm_plan(MF, m, k, n, config)
     if plan.strategy === :packed

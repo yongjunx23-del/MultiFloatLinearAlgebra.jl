@@ -241,6 +241,7 @@ function trsm!(
         (size(B, 1) == n || throw(DimensionMismatch("trsm! left dimensions differ"))) :
         (size(B, 2) == n || throw(DimensionMismatch("trsm! right dimensions differ")))
     _check_supported(MF)
+    Base.require_one_based_indexing(B, A)
 
     _trsm_scale!(B, alpha)
     transposed = trans === :T

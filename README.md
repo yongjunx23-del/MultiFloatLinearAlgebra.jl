@@ -227,12 +227,33 @@ julia -t 4 --project=benchmark benchmark/kkt_ldlt.jl 1024
 
 ## Roadmap
 
-1. Run explicit calibration on Apple Silicon and target EPYC nodes; keep
-   profiles machine-local unless multiple machines support a portable rule.
-2. Add optional mixed-precision residual/refinement primitives without
+The immediate goal is to become the authoritative MultiFloats dense backend
+that solver packages such as SDPX can rely on, not a general-purpose BLAS
+replacement. Work is sequenced in three stages.
+
+### Stage A — backend contract hardening
+
+1. Freeze the factorization public protocol behind `AbstractMFFactorization`
+   and its accessors so internal representation can evolve.
+2. Enforce machine-specific calibration compatibility and document the
+   one-based indexing / no-aliasing kernel contract.
+3. Add shape-aware GEMM calibration so the packed route is only enabled where
+   it is actually measured, rather than extrapolating square results.
+
+### Stage B — arithmetic-network productionization
+
+4. Promote the x3 fused `mulacc` prototype through real GEMM 256/512/1024
+   A/B, BigFloat differential, and 1T/4T gates. It enters production only if
+   512/1024 stay above five percent without weakening the accuracy gate.
+5. Add optional mixed-precision residual/refinement primitives without
    importing solver policy.
-3. Add sparse supernodal numeric kernels on top of the dense backend while
-   leaving symbolic analysis to the caller or a separate package.
-4. Add GPU GEMM/SYRK/GEMMT/TRSM after the CPU numerical contract is stable.
-5. Add proof-friendly arithmetic-network boundaries tied to
-   MultiFloatProofs.
+
+### Stage C — SDPX replacement primitives
+
+6. Add transpose-GEMV, TRSV, lower-SYMV, shared workspace, generalized SYRK,
+   and right TRMM, deleting one duplicate SDPX implementation at a time with a
+   correctness/iteration/time/RSS comparison.
+7. Add proof-friendly arithmetic-network boundaries tied to MultiFloatProofs.
+
+Sparse supernodal kernels and GPU kernels are deliberately deferred until the
+CPU numerical contract is frozen and the solver closure above is complete.

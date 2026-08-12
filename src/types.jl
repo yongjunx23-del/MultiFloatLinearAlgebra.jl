@@ -124,6 +124,44 @@ end
     return true
 end
 
+"""
+    AbstractMFFactorization{MF}
+
+Supertype for [`MFCholesky`](@ref), [`MFLU`](@ref), and [`MFLDLT`](@ref).
+Callers should interact with a factorization through the public accessors
+`factor_status`, `factor_kind`, `factor_matrix`, `issuccess`, `ldiv!`, and
+`solve` rather than reading its concrete fields, so the internal storage can
+evolve without breaking solver packages.
+"""
+abstract type AbstractMFFactorization{MF<:MultiFloat} end
+
+"""
+    factor_status(F::AbstractMFFactorization) -> Int
+    factor_kind(F::AbstractMFFactorization) -> Symbol
+    factor_matrix(F::AbstractMFFactorization) -> AbstractMatrix
+
+The public factorization interface. Each concrete factorization implements
+these three accessors instead of exposing its storage layout, so the internal
+representation can change without breaking solver packages.
+
+`factor_status` returns the status code: zero means success, while a nonzero
+value describes why the factorization stopped. `issuccess(F)` is shorthand for
+`iszero(factor_status(F))`.
+
+`factor_matrix` returns the matrix holding the factored data (`L`/`U`/`D` plus
+pivot structure). The returned matrix is borrowed internal storage; callers
+must not mutate it.
+"""
+function factor_status end
+function factor_kind end
+function factor_matrix end
+
+issuccess(F::AbstractMFFactorization) = iszero(factor_status(F))
+
+Base.size(F::AbstractMFFactorization) = size(factor_matrix(F))
+
+Base.eltype(::AbstractMFFactorization{MF}) where {MF} = MF
+
 function _prepare_gemm_workspace!(
     workspace::GemmWorkspace{MF},
     workers::Int,

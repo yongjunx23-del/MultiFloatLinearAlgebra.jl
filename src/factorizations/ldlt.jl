@@ -1,4 +1,4 @@
-struct MFLDLT{MF<:MultiFloat,M<:AbstractMatrix{MF}}
+struct MFLDLT{MF<:MultiFloat,M<:AbstractMatrix{MF}} <: AbstractMFFactorization{MF}
     factors::M
     dsub::Vector{MF}
     pivots::Vector{Int}
@@ -6,7 +6,9 @@ struct MFLDLT{MF<:MultiFloat,M<:AbstractMatrix{MF}}
     info::Int
 end
 
-issuccess(F::MFLDLT) = iszero(F.info)
+factor_kind(::MFLDLT) = :ldlt
+factor_status(F::MFLDLT) = F.info
+factor_matrix(F::MFLDLT) = F.factors
 
 function _mirror_lower_to_upper!(A::AbstractMatrix)
     rows = axes(A, 1)
@@ -515,6 +517,7 @@ function ldlt!(
     n, m = size(A)
     n == m || throw(DimensionMismatch("ldlt! requires a square matrix"))
     _check_supported(MF)
+    Base.require_one_based_indexing(A)
     _mirror_lower_to_upper!(A)
     if !_lower_triangle_finite(A)
         check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))

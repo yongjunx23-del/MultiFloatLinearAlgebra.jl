@@ -13,7 +13,7 @@ function _cpu_info_snapshot()
     )
 end
 
-function machine_fingerprint(; thread_count::Int=Threads.nthreads())
+function machine_fingerprint()
     cpu = _cpu_info_snapshot()
     return (
         arch=Sys.ARCH,
@@ -23,7 +23,7 @@ function machine_fingerprint(; thread_count::Int=Threads.nthreads())
         cpu_speed_mhz=cpu === nothing ? 0 : cpu.speed_mhz,
         cpu_cores=cpu === nothing ? 0 : cpu.cores,
         julia=VERSION,
-        julia_threads=max(thread_count, 1),
+        julia_threads_available=Threads.nthreads(),
     )
 end
 
@@ -39,14 +39,15 @@ function default_gemm_profile(
     thread_count::Int=Threads.nthreads(),
 ) where {MF<:MultiFloat}
     _check_supported(MF)
+    effective = min(max(thread_count, 1), Threads.nthreads())
     return GemmProfile{MF}(
         :auto,
-        _default_gemm_panel_columns(MF, thread_count),
+        _default_gemm_panel_columns(MF, effective),
         _default_gemm_micro_columns(MF),
         typemax(Int),
-        max(thread_count, 1),
+        effective,
         :builtin,
-        machine_fingerprint(; thread_count=thread_count),
+        machine_fingerprint(),
     )
 end
 
@@ -60,8 +61,15 @@ queryable and reproducible by `gemm_plan`.
 function with_gemm_profile(
     config::KernelConfig,
     profile::GemmProfile;
+    strict::Bool=true,
     thread_count::Int=profile.thread_count,
 )
+    if strict && !profile_compatible(profile; thread_count=thread_count)
+        throw(ArgumentError(
+            "GemmProfile fingerprint does not match the current machine; " *
+            "pass strict=false to force application",
+        ))
+    end
     return KernelConfig(
         reduction_tile=config.reduction_tile,
         column_tile=config.column_tile,
@@ -75,6 +83,31 @@ function with_gemm_profile(
         gemm_packed_crossover=profile.packed_crossover,
         gemm_panel_columns=profile.panel_columns,
         gemm_micro_columns=profile.micro_columns,
+    )
+end
+
+"""
+    profile_compatible(profile; thread_count=profile.thread_count) -> Bool
+
+Report whether `profile` was produced on a compatible machine. Only stable
+identity fields participate: architecture, kernel, word size, CPU model, Julia
+version, and thread count. Dynamic CPU frequency (`speed_mhz`) is deliberately
+ignored because it is not a stable fingerprint.
+"""
+function profile_compatible(
+    profile::GemmProfile;
+    thread_count::Int=profile.thread_count,
+)
+    current = machine_fingerprint()
+    recorded = profile.fingerprint
+    return (
+        thread_count == profile.thread_count &&
+        Threads.nthreads() >= profile.thread_count &&
+        recorded.arch == current.arch &&
+        recorded.kernel == current.kernel &&
+        recorded.word_size == current.word_size &&
+        recorded.cpu_model == current.cpu_model &&
+        recorded.julia == current.julia
     )
 end
 
@@ -182,7 +215,7 @@ function calibrate_gemm(
     end
 
     measurements = GemmMeasurement[]
-    workers = max(thread_count, 1)
+    workers = min(max(thread_count, 1), Threads.nthreads())
     for n in tested_sizes
         A = _calibration_matrix(MF, n, 0.1)
         B = _calibration_matrix(MF, n, 0.7)
@@ -285,7 +318,7 @@ function calibrate_gemm(
         crossover,
         workers,
         :calibrated,
-        machine_fingerprint(; thread_count=workers),
+        machine_fingerprint(),
     )
     return GemmCalibration{MF}(
         profile,
