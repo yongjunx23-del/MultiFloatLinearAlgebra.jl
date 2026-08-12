@@ -1,8 +1,11 @@
 name: KKT LDLT Benchmark
 
 on:
-  pull_request:
   workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   kkt-ldlt:
