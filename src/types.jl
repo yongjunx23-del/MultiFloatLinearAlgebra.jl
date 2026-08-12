@@ -6,9 +6,9 @@ The package never runs hidden machine calibration: `:auto` resolves from the
 stored thresholds and type-specific defaults, while `calibrate_gemm` returns a
 reproducible profile that callers may apply with `with_gemm_profile`.
 
-Uncalibrated defaults deliberately retain direct GEMM and unblocked LDLT. A
-caller must apply a measured profile or lower a crossover explicitly before an
-experimental optimized route can replace the established path.
+Uncalibrated GEMM remains on the established direct route. LDLT uses the
+unblocked route below its documented crossover and the measured blocked route
+at or above it.
 """
 Base.@kwdef struct KernelConfig
     reduction_tile::Int = 64
@@ -86,6 +86,7 @@ end
 struct GemmCalibration{MF<:MultiFloat}
     profile::GemmProfile{MF}
     measurements::Vector{GemmMeasurement}
+    minimum_speedup::Float64
 end
 
 @inline _workers(config::KernelConfig, jobs::Int) =
