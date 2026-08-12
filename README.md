@@ -3,31 +3,31 @@
 A standalone CPU linear-algebra backend designed specifically for
 [MultiFloats.jl](https://github.com/dzhang314/MultiFloats.jl).
 
-The package is intentionally solver-independent: it does **not** depend on
-SDPX.jl or any optimization model. Solver packages can call this package as a
-backend and keep planning, sparse symbolic analysis, KKT assembly, precision
-selection, and certification in their own layers.
+The package is intentionally solver-independent. It does **not** depend on
+SDPX.jl or any optimization model. Solver packages can call it for dense
+numeric kernels and factorizations while retaining problem analysis, sparse
+symbolics, KKT assembly, precision policy, fallback policy, and certification
+in their own layers.
 
-## Status
-
-The current CPU backend implements:
+## Implemented backend
 
 - deterministic `mfdot`;
 - SIMD/threaded `gemv!`;
-- SIMD/threaded dense `gemm!`;
-- lower-triangular SIMD/threaded `syrk!`;
-- BLAS-like left/right `trsm!` with lower/upper and transpose support;
-- blocked lower Cholesky using the shared `trsm!` + `syrk!` kernels;
-- blocked partial-pivoting LU using panel factorization + `trsm!` + `gemm!`;
-- symmetric-indefinite LDLᵀ with Bunch--Kaufman-style 1×1/2×2 pivots;
-- vector and multi-RHS solves for Cholesky, LU, and LDLᵀ factors.
+- direct and B-panel-packed `gemm!`;
+- lower-triangular `syrk!` and `gemmt!`;
+- BLAS-like left/right `trsm!`;
+- blocked lower Cholesky using TRSM/SYRK;
+- blocked partial-pivoting LU using TRSM/GEMM;
+- Bunch--Kaufman-style symmetric-indefinite LDLT with 1x1/2x2 pivots;
+- vector and multi-RHS solves for Cholesky, LU, and LDLT;
+- explicit x2/x3/x4 GEMM calibration and inspectable route plans.
 
-The SIMD kernels map four independent matrix rows or right-hand sides into
-`MultiFloatVec{4,T,N}` lanes. This reuses MultiFloats.jl's native arithmetic
-networks instead of repeatedly converting through BigFloat.
+The hot kernels map four independent matrix rows or right-hand sides into
+`MultiFloatVec{4,T,N}` lanes. They use MultiFloats.jl's native fixed-width
+arithmetic rather than converting through `BigFloat`.
 
-GPU kernels and sparse symbolic/supernodal factorization remain separate future
-milestones.
+The package supports one- through four-limb `MultiFloat{T,N}` values. It does
+not claim support for experimental x5-x8 arithmetic.
 
 ## Installation
 
@@ -42,18 +42,18 @@ For development:
 Pkg.develop(path="MultiFloatLinearAlgebra.jl")
 ```
 
-## Backend API
+## Basic backend use
 
 ```julia
 using MultiFloats
 using MultiFloatLinearAlgebra
 
 T = Float64x4
-config = KernelConfig(thread_count=Threads.nthreads())
-
 A = T.(randn(256, 256))
 B = T.(randn(256, 256))
 C = zeros(T, 256, 256)
+
+config = KernelConfig(thread_count=Threads.nthreads())
 gemm!(C, A, B; config)
 
 # SPD factor/solve
@@ -66,133 +66,172 @@ x = solve(Fc, T.(randn(256)); config)
 Flu = MultiFloatLinearAlgebra.lu!(copy(A); config)
 y = solve(Flu, T.(randn(256, 8)); config)
 
-# Symmetric-indefinite factor/solve (KKT-style backend primitive)
+# Symmetric-indefinite KKT-style factor/solve
 K = copy(A + transpose(A))
-Fldl = MultiFloatLinearAlgebra.ldlt!(K)
+Fldl = MultiFloatLinearAlgebra.ldlt!(K; config)
 z = solve(Fldl, T.(randn(256)); config)
 ```
 
-The package intentionally does not pirate `LinearAlgebra.mul!`,
-`LinearAlgebra.cholesky!`, `LinearAlgebra.lu!`, or factorization dispatch. The
-backend choice stays explicit so callers such as SDPX.jl can A/B or route it
-without load-order-dependent behavior.
+The package deliberately does not pirate `LinearAlgebra.mul!`,
+`LinearAlgebra.cholesky!`, or `LinearAlgebra.lu!`. Backend selection remains
+explicit, so callers can A/B the specialized implementation against Julia's
+generic algorithms.
 
-## Numerical backend structure
+## Packed GEMM and machine calibration
+
+The retained packed route packs only B panels into reusable caller-owned
+storage. This avoids repacking A on every call and preserves the direct
+kernel's per-output ascending reduction order.
+
+```julia
+T = Float64x2
+n = 1024
+A = T.(randn(n, n))
+B = T.(randn(n, n))
+C = zeros(T, n, n)
+
+workspace = GemmWorkspace(
+    T;
+    thread_count=Threads.nthreads(),
+    capacity=n * 32,
+)
+
+packed = KernelConfig(
+    thread_count=Threads.nthreads(),
+    gemm_strategy=:packed,
+    gemm_panel_columns=32,
+    gemm_micro_columns=4,
+)
+
+gemm!(C, A, B; config=packed, workspace)
+```
+
+Uncalibrated `gemm_strategy=:auto` deliberately stays on the direct route.
+Calibration is explicit and has no process-global state:
+
+```julia
+calibration = calibrate_gemm(
+    Float64x2;
+    sizes=(512, 1024),
+    samples=3,
+    thread_count=Threads.nthreads(),
+    minimum_speedup=1.05,
+)
+
+profile = calibration.profile
+config = with_gemm_profile(KernelConfig(), profile)
+plan = gemm_plan(Float64x2, 1024, 1024, 1024, config)
+```
+
+`GemmCalibration` records the complete measurements, selected geometry,
+required minimum speedup, machine fingerprint, and crossover. The candidate
+is selected at the largest tested size and is enabled only over a stable
+winning suffix of the requested sizes.
+
+On the documented four-thread GitHub x86-64 runner, B-panel packing is stable
+for Float64x2: about 1.16x at n=512 and 1.11x at n=1024. Float64x3 and
+Float64x4 do not clear the five-percent gate at n=1024 and therefore retain
+the direct route. These are machine results, not portable hard-coded profiles.
+
+## Symmetric-indefinite LDLT
+
+The blocked path retains Bunch--Kaufman-style 1x1/2x2 pivot decisions. Each
+panel forms `W = L*D`, then delegates the lower-triangular trailing update to
+`gemmt!`:
 
 ```text
-mfdot
-  │
-  ├── gemv!
-  ├── gemm! ───────────────┐
-  ├── syrk! ────────┐      │
-  └── trsm! ───┐    │      │
-               │    │      │
-          Cholesky  │      │
-                    │      │
-                blocked LU ┘
-
-          LDLᵀ (1×1 / 2×2 D)
-               │
-             solve
+A22_lower <- A22_lower - L21 * W21'
 ```
 
-The important design rule is that O(n³) factorization work is pushed into the
-same shared kernels exposed to callers. Cholesky uses TRSM/SYRK; blocked LU
-uses TRSM/GEMM. This avoids solver-specific or factorization-specific matrix
-multiply implementations.
+Only the lower triangle performs multiplication; an inexpensive mirror copy
+restores the dense symmetric view used by subsequent pivot searches.
 
-## Benchmark
-
-Instantiate the benchmark environment once:
-
-```bash
-julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+```julia
+K = T.(your_symmetric_kkt_matrix)
+config = KernelConfig(thread_count=Threads.nthreads())
+plan = ldlt_plan(T, size(K, 1), config)
+F = MultiFloatLinearAlgebra.ldlt!(K; config)
+x = solve(F, T.(rhs); config)
 ```
 
-Then run, for example:
+The default `:auto` route uses the established unblocked factorization below
+n=512 and blocked LDLT at or above n=512. Measured default panel widths are:
 
-```bash
-julia -t 4 --project=benchmark benchmark/benchmarks.jl 256
+| Arithmetic | Panel width |
+|---|---:|
+| Float64x2 | 16 |
+| Float64x3 | 12 |
+| Float64x4 | 8 |
+
+On saddle-point KKT matrices, the blocked route measured 1.78x/1.27x/1.36x
+at n=512 and 4.52x/1.71x/1.66x at n=1024 for x2/x3/x4, respectively. The
+corresponding relative solve residuals were approximately 1e-31, 1e-48, and
+1e-64.
+
+## Solver integration boundary
+
+A solver adapter can remain thin:
+
+```julia
+# SPD system
+factor = MultiFloatLinearAlgebra.cholesky!(matrix; config)
+MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
+
+# General dense system
+factor = MultiFloatLinearAlgebra.lu!(matrix; config)
+MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
+
+# Symmetric-indefinite KKT system
+factor = MultiFloatLinearAlgebra.ldlt!(matrix; config)
+MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
 ```
 
-Add `--bigfloat` to include a 256-bit BigFloat GEMM reference.
-
-### Reproducible CI baseline
-
-GitHub-hosted Ubuntu runner, Julia 1.12.6, 4 Julia threads, 1 BLAS thread.
-These are directional CI numbers rather than dedicated-HPC-node claims.
-
-| operation | n | arithmetic | generic LinearAlgebra | MFLA | speedup |
-|---|---:|---|---:|---:|---:|
-| GEMM | 256 | Float64x2 | 143.178 ms | 9.902 ms | 14.46× |
-| GEMM | 256 | Float64x3 | 546.941 ms | 38.884 ms | 14.07× |
-| GEMM | 256 | Float64x4 | 1151.840 ms | 95.980 ms | 12.00× |
-| TRSM | 256 | Float64x2 | 5.875 ms | 1.323 ms | 4.44× |
-| TRSM | 256 | Float64x3 | 27.150 ms | 5.562 ms | 4.88× |
-| TRSM | 256 | Float64x4 | 66.849 ms | 8.486 ms | 7.88× |
-| Cholesky | 256 | Float64x2 | 14.413 ms | 6.395 ms | 2.25× |
-| Cholesky | 256 | Float64x3 | 67.604 ms | 13.115 ms | 5.15× |
-| Cholesky | 256 | Float64x4 | 171.889 ms | 28.143 ms | 6.11× |
-| LU | 256 | Float64x2 | 31.382 ms | 11.914 ms | 2.63× |
-| LU | 256 | Float64x3 | 135.084 ms | 20.839 ms | 6.48× |
-| LU | 256 | Float64x4 | 344.422 ms | 45.793 ms | 7.52× |
-
-The first LDLᵀ implementation currently measures approximately 1.20 ms,
-4.05 ms, and 8.27 ms at n=128 for Float64x2/x3/x4 respectively. Its current
-benchmark is backend-only because Julia's generic symmetric-indefinite path is
-not used as a stable comparison contract here.
-
-For scale context, the same CI run measured one-thread Float64 BLAS GEMM near
-0.83 ms at n=256. The primary metric for this project remains specialized
-MultiFloat backend versus generic MultiFloat `LinearAlgebra`.
+The caller remains responsible for choosing the arithmetic type, deciding
+whether a fallback is allowed, assembling sparse or structured systems, and
+validating the final residual or certificate.
 
 ## Validation
 
-CI runs on Julia 1.10, 1.11, and 1.12. Current tests cover Float64x2/x3/x4:
+The correctness suite covers Float64x2/x3/x4 on Julia 1.10, 1.11, and 1.12:
 
-- dot/GEMV/GEMM/SYRK;
-- TRSM on left/right, lower/upper, normal/transposed systems;
-- unit and non-unit triangular solves;
-- blocked Cholesky reconstruction and multi-RHS residuals;
-- blocked partial-pivoting LU vector/multi-RHS residuals;
-- LDLᵀ 1×1 pivot cases;
-- forced LDLᵀ 2×2 pivot cases and multi-RHS residuals.
+- direct and packed GEMM equality with reusable workspace;
+- GEMV, lower SYRK, GEMMT, and left/right TRSM variants;
+- Cholesky reconstruction and vector/multi-RHS residuals;
+- blocked LU and vector/multi-RHS residuals;
+- LDLT 1x1 and forced 2x2 pivots;
+- blocked LDLT panel-boundary 2x2 cases and multi-RHS residuals.
 
-All three Julia-version jobs pass on the current backend commit.
+## Benchmarks
 
-## SDPX integration boundary
+The complete environment, A/B tables, KKT residuals, route decisions, and
+reproduction commands are recorded in
+[`benchmark/RESULTS.md`](benchmark/RESULTS.md).
 
-SDPX.jl should treat this package as a numerical backend only. A clean caller
-boundary is:
+Ordinary dense benchmark:
 
-```text
-SDPX planner / sparse symbolic / KKT assembly / certification
-                         │
-                         ▼
-             MultiFloatLinearAlgebra
-       GEMM / SYRK / TRSM / factor / solve
-                         │
-                         ▼
-                    MultiFloats.jl
+```bash
+julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia -t 4 --project=benchmark benchmark/benchmarks.jl 256 --bigfloat
 ```
 
-This package should not absorb SDPX's route selection, cone logic, tolerances,
-precision policy, or certification.
+Large throughput and calibration workflows are manual by design:
+
+```bash
+julia -t 4 --project=benchmark benchmark/packed_gemm.jl 512 --generic
+julia -t 4 --project=benchmark benchmark/packed_gemm.jl 1024
+julia -t 4 --project=benchmark benchmark/calibrate_gemm.jl 512 1024 3 1.05
+julia -t 4 --project=benchmark benchmark/ldlt_scaling.jl 1024
+julia -t 4 --project=benchmark benchmark/kkt_ldlt.jl 1024
+```
 
 ## Roadmap
 
-1. Packed-panel GEMM and architecture-specific cache/microkernel calibration.
-2. Blocked/parallel symmetric-indefinite LDLᵀ trailing updates.
-3. Optional mixed-precision residual/refinement primitives without solver
-   policy.
-4. Sparse supernodal **numeric** kernels on top of the dense backend while
+1. Run explicit calibration on Apple Silicon and target EPYC nodes; keep
+   profiles machine-local unless multiple machines support a portable rule.
+2. Add optional mixed-precision residual/refinement primitives without
+   importing solver policy.
+3. Add sparse supernodal numeric kernels on top of the dense backend while
    leaving symbolic analysis to the caller or a separate package.
-5. GPU GEMM/SYRK/TRSM after the CPU numerical contract is stable.
-6. A proof-friendly arithmetic-network boundary so core kernels can track
-   formal guarantees from MultiFloatProofs.
-
-## Numerical contract
-
-The current kernels support one- through four-limb `MultiFloat{T,N}` values.
-They preserve each SIMD lane's scalar dependency/reduction order. The package
-does not claim support for experimental x5-x8 arithmetic.
+4. Add GPU GEMM/SYRK/GEMMT/TRSM after the CPU numerical contract is stable.
+5. Add proof-friendly arithmetic-network boundaries tied to
+   MultiFloatProofs.
