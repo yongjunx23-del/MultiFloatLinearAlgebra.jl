@@ -2,6 +2,11 @@ name: Packed GEMM Benchmark
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/bootstrap-linear-algebra
+    paths:
+      - .github/workflows/packed-benchmark.yml
 
 permissions:
   actions: write
