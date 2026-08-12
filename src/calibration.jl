@@ -11,22 +11,20 @@ end
 """
     default_gemm_profile(T; thread_count=Threads.nthreads())
 
-Return the built-in, deterministic x1/x2/x3/x4 packing geometry. This does not
-run a benchmark and is suitable for reproducible defaults or as a calibration
-starting point.
+Return the built-in x1/x2/x3/x4 panel geometry without enabling the packed
+route. Built-in profiles use an infinite crossover so the established direct
+kernel remains authoritative until `calibrate_gemm` supplies measured evidence.
 """
 function default_gemm_profile(
     ::Type{MF};
     thread_count::Int=Threads.nthreads(),
 ) where {MF<:MultiFloat}
     _check_supported(MF)
-    limbs = _limb_count(MF)
-    crossover = limbs <= 2 ? 160 : limbs == 3 ? 176 : 192
     return GemmProfile{MF}(
         :auto,
         _default_gemm_panel_columns(MF, thread_count),
         _default_gemm_micro_columns(MF),
-        crossover,
+        typemax(Int),
         max(thread_count, 1),
         :builtin,
         machine_fingerprint(; thread_count=thread_count),
@@ -68,7 +66,7 @@ function _gemm_calibration_candidates(::Type{MF}) where {MF<:MultiFloat}
     elseif limbs == 3
         return [(16, 2), (24, 2), (24, 4), (32, 2)]
     end
-    return [(12, 2), (16, 1), (16, 2), (24, 2)]
+    return [(8, 4), (12, 2), (16, 2), (24, 2)]
 end
 
 function _calibration_matrix(::Type{MF}, n::Int, phase::Float64) where {MF<:MultiFloat}
@@ -102,11 +100,11 @@ end
     calibrate_gemm(T; sizes=(128, 256), samples=3,
                    thread_count=Threads.nthreads(), candidates=nothing)
 
-Benchmark the direct route and a small, deterministic packed-panel candidate
-set. The function returns every measurement plus a `GemmProfile`; it never
-installs global state. The crossover is the smallest tested size where the
-winning packed geometry is at least two percent faster than the direct route.
-If no packed candidate wins, the returned profile explicitly selects `:direct`.
+Benchmark the direct route and a deterministic packed-panel candidate set. The
+function returns every measurement plus a `GemmProfile`; it never installs
+global state. The crossover is the smallest tested size where the winning
+packed geometry is at least two percent faster than direct. If no candidate
+wins, the returned profile explicitly selects `:direct`.
 """
 function calibrate_gemm(
     ::Type{MF};
