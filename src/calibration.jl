@@ -96,24 +96,57 @@ function _median_elapsed_seconds(function_call, samples::Int)
     return elapsed[cld(count, 2)]
 end
 
+function _calibration_seconds(
+    measurements::Vector{GemmMeasurement},
+    size::Int,
+    strategy::Symbol,
+    panel_columns::Int=0,
+    micro_columns::Int=0,
+)
+    for measurement in measurements
+        if measurement.size == size &&
+           measurement.strategy === strategy &&
+           (strategy === :direct ||
+            (measurement.panel_columns == panel_columns &&
+             measurement.micro_columns == micro_columns))
+            return measurement.seconds
+        end
+    end
+    throw(ArgumentError("missing GEMM calibration measurement"))
+end
+
 """
-    calibrate_gemm(T; sizes=(128, 256), samples=3,
-                   thread_count=Threads.nthreads(), candidates=nothing)
+    calibrate_gemm(T; sizes=(256, 512), samples=3,
+                   thread_count=Threads.nthreads(), candidates=nothing,
+                   minimum_speedup=1.05)
 
 Benchmark the direct route and a deterministic packed-panel candidate set. The
 function returns every measurement plus a `GemmProfile`; it never installs
-global state. The crossover is the smallest tested size where the winning
-packed geometry is at least two percent faster than direct. If no candidate
-wins, the returned profile explicitly selects `:direct`.
+global state.
+
+The candidate is chosen by performance at the largest tested size. Packed mode
+is accepted only when that largest point beats direct by `minimum_speedup`, and
+the crossover is the earliest tested size from which every larger tested point
+also clears the same margin. This suffix rule prevents a noisy small matrix
+from enabling a route that regresses at the intended production scale.
+
+The direct and packed outputs must also be exactly equal under the package's
+ascending-reduction contract. If no candidate passes both numerical and timing
+gates, the returned profile explicitly selects `:direct`.
 """
 function calibrate_gemm(
     ::Type{MF};
-    sizes=(128, 256),
+    sizes=(256, 512),
     samples::Int=3,
     thread_count::Int=Threads.nthreads(),
     candidates=nothing,
+    minimum_speedup::Real=1.05,
 ) where {MF<:MultiFloat}
     _check_supported(MF)
+    required_speedup = Float64(minimum_speedup)
+    isfinite(required_speedup) && required_speedup > 1.0 ||
+        throw(ArgumentError("minimum_speedup must be finite and greater than one"))
+
     tested_sizes = sort!(unique!(Int[max(Int(size), 1) for size in sizes]))
     isempty(tested_sizes) && throw(ArgumentError("calibration requires at least one size"))
     candidate_list = candidates === nothing ?
@@ -131,14 +164,14 @@ function calibrate_gemm(
     for n in tested_sizes
         A = _calibration_matrix(MF, n, 0.1)
         B = _calibration_matrix(MF, n, 0.7)
-        C = zeros(MF, n, n)
+        direct_output = zeros(MF, n, n)
 
         direct_config = KernelConfig(
             thread_count=workers,
             gemm_strategy=:direct,
         )
         direct_seconds = _median_elapsed_seconds(samples) do
-            gemm!(C, A, B; config=direct_config)
+            gemm!(direct_output, A, B; config=direct_config)
         end
         push!(
             measurements,
@@ -157,15 +190,18 @@ function calibrate_gemm(
                 thread_count=workers,
                 capacity=n * panel_columns,
             )
+            packed_output = zeros(MF, n, n)
             packed_seconds = _median_elapsed_seconds(samples) do
                 gemm!(
-                    C,
+                    packed_output,
                     A,
                     B;
                     config=packed_config,
                     workspace=workspace,
                 )
             end
+            packed_output == direct_output ||
+                throw(ErrorException("packed GEMM changed the direct reduction result"))
             push!(
                 measurements,
                 GemmMeasurement(
@@ -179,35 +215,44 @@ function calibrate_gemm(
         end
     end
 
-    scores = fill(0.0, length(candidate_list))
-    for (candidate_index, (panel_columns, micro_columns)) in pairs(candidate_list)
-        for measurement in measurements
-            if measurement.strategy === :packed &&
-               measurement.panel_columns == panel_columns &&
-               measurement.micro_columns == micro_columns
-                scores[candidate_index] += log(measurement.seconds)
-            end
-        end
-    end
-    best_index = argmin(scores)
+    largest_size = last(tested_sizes)
+    largest_candidate_seconds = Float64[
+        _calibration_seconds(
+            measurements,
+            largest_size,
+            :packed,
+            panel_columns,
+            micro_columns,
+        )
+        for (panel_columns, micro_columns) in candidate_list
+    ]
+    best_index = argmin(largest_candidate_seconds)
     best_panel, best_micro = candidate_list[best_index]
 
+    function wins_at(size::Int)
+        direct_seconds = _calibration_seconds(
+            measurements, size, :direct,
+        )
+        packed_seconds = _calibration_seconds(
+            measurements, size, :packed, best_panel, best_micro,
+        )
+        return packed_seconds * required_speedup <= direct_seconds
+    end
+
     crossover = typemax(Int)
-    for n in tested_sizes
-        direct_seconds = only(
-            measurement.seconds for measurement in measurements
-            if measurement.size == n && measurement.strategy === :direct
-        )
-        packed_seconds = only(
-            measurement.seconds for measurement in measurements
-            if measurement.size == n &&
-               measurement.strategy === :packed &&
-               measurement.panel_columns == best_panel &&
-               measurement.micro_columns == best_micro
-        )
-        if packed_seconds <= 0.98 * direct_seconds
-            crossover = n
-            break
+    if wins_at(largest_size)
+        for first_index in eachindex(tested_sizes)
+            stable_suffix = true
+            for index in first_index:lastindex(tested_sizes)
+                if !wins_at(tested_sizes[index])
+                    stable_suffix = false
+                    break
+                end
+            end
+            if stable_suffix
+                crossover = tested_sizes[first_index]
+                break
+            end
         end
     end
 
@@ -220,5 +265,9 @@ function calibrate_gemm(
         :calibrated,
         machine_fingerprint(; thread_count=workers),
     )
-    return GemmCalibration{MF}(profile, measurements)
+    return GemmCalibration{MF}(
+        profile,
+        measurements,
+        required_speedup,
+    )
 end
