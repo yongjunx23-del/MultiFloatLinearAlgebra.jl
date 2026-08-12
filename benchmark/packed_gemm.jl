@@ -1,4 +1,3 @@
-using BenchmarkTools
 using LinearAlgebra
 using MultiFloats
 using MultiFloatLinearAlgebra
@@ -9,7 +8,19 @@ Random.seed!(20260812)
 BLAS.set_num_threads(1)
 const TYPES = (Float64x2, Float64x3, Float64x4)
 
-median_seconds(trial) = BenchmarkTools.median(trial).time / 1e9
+function median_seconds(function_call, samples)
+    count = max(Int(samples), 1)
+    function_call()
+    elapsed = Vector{Float64}(undef, count)
+    for sample in 1:count
+        GC.gc()
+        start = time_ns()
+        function_call()
+        elapsed[sample] = (time_ns() - start) / 1.0e9
+    end
+    sort!(elapsed)
+    return elapsed[cld(count, 2)]
+end
 
 function report(arithmetic, backend, n, seconds, reference=nothing)
     equivalent_gflops = 2.0 * n^3 / seconds / 1.0e9
@@ -68,28 +79,36 @@ function benchmark_type(::Type{T}, n, samples, include_generic) where {T}
         "crossover=$(profile.packed_crossover), fingerprint=$(profile.fingerprint)",
     )
 
-    direct_trial = @benchmark MultiFloatLinearAlgebra.gemm!(
-        $Cdirect, $A, $B; config=$direct_config,
-    ) samples=$samples evals=1
-    packed_trial = @benchmark MultiFloatLinearAlgebra.gemm!(
-        $Cpacked, $A, $B; config=$packed_config, workspace=$workspace,
-    ) samples=$samples evals=1
-    auto_trial = @benchmark MultiFloatLinearAlgebra.gemm!(
-        $Cauto, $A, $B; config=$auto_config, workspace=$workspace,
-    ) samples=$samples evals=1
+    direct_seconds = median_seconds(samples) do
+        MultiFloatLinearAlgebra.gemm!(Cdirect, A, B; config=direct_config)
+    end
+    packed_seconds = median_seconds(samples) do
+        MultiFloatLinearAlgebra.gemm!(
+            Cpacked,
+            A,
+            B;
+            config=packed_config,
+            workspace=workspace,
+        )
+    end
+    auto_seconds = median_seconds(samples) do
+        MultiFloatLinearAlgebra.gemm!(
+            Cauto,
+            A,
+            B;
+            config=auto_config,
+            workspace=workspace,
+        )
+    end
 
-    direct_seconds = median_seconds(direct_trial)
-    packed_seconds = median_seconds(packed_trial)
-    auto_seconds = median_seconds(auto_trial)
     Cpacked == Cdirect || error("packed GEMM changed the per-output reduction result")
     Cauto == Cdirect || error("auto GEMM changed the per-output reduction result")
 
     if include_generic
         Cgeneric = zeros(T, n, n)
-        generic_trial = @benchmark LinearAlgebra.mul!(
-            $Cgeneric, $A, $B,
-        ) samples=1 evals=1
-        generic_seconds = median_seconds(generic_trial)
+        generic_seconds = median_seconds(1) do
+            LinearAlgebra.mul!(Cgeneric, A, B)
+        end
         report(string(T), "LinearAlgebra", n, generic_seconds)
         report(string(T), "MFLA/direct", n, direct_seconds, generic_seconds)
         report(string(T), "MFLA/packed", n, packed_seconds, generic_seconds)
@@ -116,8 +135,10 @@ function main()
     A64 = randn(n, n)
     B64 = randn(n, n)
     C64 = zeros(n, n)
-    float_trial = @benchmark mul!($C64, $A64, $B64) samples=$samples evals=1
-    report("Float64", "BLAS(1 thread)", n, median_seconds(float_trial))
+    float_seconds = median_seconds(samples) do
+        mul!(C64, A64, B64)
+    end
+    report("Float64", "BLAS(1 thread)", n, float_seconds)
     println()
 
     for T in TYPES
