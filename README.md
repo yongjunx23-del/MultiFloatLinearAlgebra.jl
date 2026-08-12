@@ -45,6 +45,7 @@ Pkg.develop(path="MultiFloatLinearAlgebra.jl")
 ## Basic backend use
 
 ```julia
+using LinearAlgebra
 using MultiFloats
 using MultiFloatLinearAlgebra
 
