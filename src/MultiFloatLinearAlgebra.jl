@@ -18,6 +18,7 @@ include("kernels/trsm.jl")
 include("factorizations/cholesky.jl")
 include("factorizations/lu.jl")
 include("factorizations/ldlt.jl")
+include("factorizations/ldlt_tuning.jl")
 include("factorizations/ldlt_gemmt.jl")
 include("solve.jl")
 
