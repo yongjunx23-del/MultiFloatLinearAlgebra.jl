@@ -5,6 +5,10 @@ Explicit cache, threading, and route configuration for MultiFloat kernels.
 The package never runs hidden machine calibration: `:auto` resolves from the
 stored thresholds and type-specific defaults, while `calibrate_gemm` returns a
 reproducible profile that callers may apply with `with_gemm_profile`.
+
+Uncalibrated defaults deliberately retain direct GEMM and unblocked LDLT. A
+caller must apply a measured profile or lower a crossover explicitly before an
+experimental optimized route can replace the established path.
 """
 Base.@kwdef struct KernelConfig
     reduction_tile::Int = 64
@@ -13,10 +17,10 @@ Base.@kwdef struct KernelConfig
     lu_block::Int = 16
     ldlt_block::Int = 0
     ldlt_strategy::Symbol = :auto
-    ldlt_blocked_crossover::Int = 64
+    ldlt_blocked_crossover::Int = 512
     thread_count::Int = Threads.nthreads()
     gemm_strategy::Symbol = :auto
-    gemm_packed_crossover::Int = 192
+    gemm_packed_crossover::Int = typemax(Int)
     gemm_panel_columns::Int = 0
     gemm_micro_columns::Int = 0
 end
