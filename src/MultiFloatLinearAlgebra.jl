@@ -1,7 +1,7 @@
 module MultiFloatLinearAlgebra
 
-using LinearAlgebra
-using Base.Threads
+import LinearAlgebra
+import Base.Threads
 using MultiFloats
 
 import MultiFloats: MultiFloat, MultiFloatVec
