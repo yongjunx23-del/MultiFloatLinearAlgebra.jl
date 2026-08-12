@@ -74,14 +74,14 @@ end
                 A64 = R * transpose(R) + n * I
                 Aspd = T.(Matrix(A64))
                 original = copy(Aspd)
-                F = cholesky!(
+                F = MultiFloatLinearAlgebra.cholesky!(
                     Aspd;
                     config=KernelConfig(
                         cholesky_block=4,
                         thread_count=2,
                     ),
                 )
-                @test issuccess(F)
+                @test MultiFloatLinearAlgebra.issuccess(F)
                 L = Matrix(LowerTriangular(F.factors))
                 reconstructed = L * transpose(L)
                 @test max_relative_error(reconstructed, original) <=
@@ -96,9 +96,9 @@ end
                 original = copy(Alu)
                 rhs = T.(randn(n))
                 rhs_original = copy(rhs)
-                F = lu!(Alu)
-                @test issuccess(F)
-                solution = solve(F, rhs)
+                F = MultiFloatLinearAlgebra.lu!(Alu)
+                @test MultiFloatLinearAlgebra.issuccess(F)
+                solution = MultiFloatLinearAlgebra.solve(F, rhs)
                 residual = original * solution - rhs_original
                 @test max_relative_error(residual, zeros(T, n)) <=
                     tolerance(T, 64n)
