@@ -1,7 +1,9 @@
 name: Ordered TwoSum Experiment
 
 on:
-  pull_request:
+  push:
+    branches:
+      - agent/bootstrap-linear-algebra
     paths:
       - "benchmark/ordered_twosum.jl"
       - ".github/workflows/ordered-twosum.yml"
