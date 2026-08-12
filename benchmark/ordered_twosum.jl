@@ -83,6 +83,35 @@ end
 @inline ordered_add(x::MultiFloatVec{4,Float64,3}, y::MultiFloatVec{4,Float64,3}) = ordered_add3(x, y)
 @inline ordered_add(x::MultiFloatVec{4,Float64,4}, y::MultiFloatVec{4,Float64,4}) = ordered_add4(x, y)
 
+@inline function vec4_bitwise_equal(x::MultiFloatVec{4}, y::MultiFloatVec{4})
+    @inbounds for lane in 1:4
+        x[lane] === y[lane] || return false
+    end
+    return true
+end
+
+function array_bitwise_equal(x, y)
+    length(x) == length(y) || return false
+    @inbounds for i in eachindex(x, y)
+        vec4_bitwise_equal(x[i], y[i]) || return false
+    end
+    return true
+end
+
+@inline function vec4_isnormalized(x::MultiFloatVec{4})
+    @inbounds for lane in 1:4
+        MultiFloats.isnormalized(x[lane]) || return false
+    end
+    return true
+end
+
+function array_isnormalized(x)
+    @inbounds for value in x
+        vec4_isnormalized(value) || return false
+    end
+    return true
+end
+
 function make_data(::Type{T}, n::Int; cancellation=false) where {T<:MultiFloat}
     V = MultiFloatVec{4,Float64,T.parameters[2]}
     a = Vector{V}(undef, n)
@@ -154,7 +183,6 @@ function native_stats(f, signature)
 end
 
 function check_twosum_primitive(::Type{T}) where {T<:MultiFloat}
-    V = MultiFloatVec{4,Float64,T.parameters[2]}
     a, b = make_data(T, 4096)
     ac, bc = make_data(T, 4096; cancellation=true)
     for (xs, ys) in ((a, b), (ac, bc))
@@ -182,8 +210,8 @@ function profile_type(::Type{T}; n=4096, repeats=16, samples=5) where {T<:MultiF
         ordered = similar(a)
         standard_kernel!(standard, a, b, 1)
         ordered_kernel!(ordered, a, b, 1)
-        equal = standard == ordered
-        normalized = all(MultiFloats.isnormalized, ordered)
+        equal = array_bitwise_equal(standard, ordered)
+        normalized = array_isnormalized(ordered)
         println("mode=$(cancellation ? "cancellation" : "scaled-random") bitwise_equal=$equal normalized=$normalized")
         equal || error("ordered mfadd changed MultiFloat result")
         normalized || error("ordered mfadd returned non-normalized output")
