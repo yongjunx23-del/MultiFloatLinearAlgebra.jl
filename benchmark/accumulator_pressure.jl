@@ -30,15 +30,15 @@ function make_inputs(::Type{T}, n::Int) where {T<:MultiFloat}
     b4 = Vector{T}(undef, n)
     @inbounds for i in 1:n
         a[i] = V(
-            T(0.8 + 0.05sin(0.013i)),
-            T(0.7 + 0.04cos(0.017i)),
-            T(0.9 + 0.03sin(0.019i)),
-            T(0.6 + 0.02cos(0.023i)),
+            T(0.8 + 0.05 * sin(0.013 * i)),
+            T(0.7 + 0.04 * cos(0.017 * i)),
+            T(0.9 + 0.03 * sin(0.019 * i)),
+            T(0.6 + 0.02 * cos(0.023 * i)),
         )
-        b1[i] = T(0.7 + 0.03sin(0.029i))
-        b2[i] = T(0.8 + 0.03cos(0.031i))
-        b3[i] = T(0.9 + 0.02sin(0.037i))
-        b4[i] = T(0.6 + 0.02cos(0.041i))
+        b1[i] = T(0.7 + 0.03 * sin(0.029 * i))
+        b2[i] = T(0.8 + 0.03 * cos(0.031 * i))
+        b3[i] = T(0.9 + 0.02 * sin(0.037 * i))
+        b4[i] = T(0.6 + 0.02 * cos(0.041 * i))
     end
     return a, b1, b2, b3, b4
 end
@@ -122,9 +122,8 @@ function actual_instructions(native::String)
     for line in eachline(IOBuffer(native))
         s = strip(line)
         isempty(s) && continue
-        startswith(s, (".", "#", ";")) && continue
+        (startswith(s, ".") || startswith(s, "#") || startswith(s, ";")) && continue
         endswith(s, ":") && continue
-        startswith(s, ".set ") && continue
         occursin(r"^[A-Za-z][A-Za-z0-9.]*\s", s) || continue
         push!(result, s)
     end
@@ -187,13 +186,13 @@ function profile_type(::Type{T}; n=2048, repeats=16, samples=5, outdir="") where
     ns1 = report("one accumulator", t1, scalar_products, t1 * 1e9 / scalar_products)
 
     t2i = median_seconds(() -> dot2_interleaved(a, b1, b2, repeats), samples)
-    report("two interleaved", t2i, 2scalar_products, ns1)
+    report("two interleaved", t2i, 2 * scalar_products, ns1)
 
     t2s = median_seconds(() -> dot2_split(a, b1, b2, repeats), samples)
-    report("two split loops", t2s, 2scalar_products, ns1)
+    report("two split loops", t2s, 2 * scalar_products, ns1)
 
     t4 = median_seconds(() -> dot4_interleaved(a, b1, b2, b3, b4, repeats), samples)
-    report("four interleaved", t4, 4scalar_products, ns1)
+    report("four interleaved", t4, 4 * scalar_products, ns1)
 
     probes = (
         ("dot1", dot1, (Vector{V}, Vector{T}, Int)),
@@ -202,11 +201,12 @@ function profile_type(::Type{T}; n=2048, repeats=16, samples=5, outdir="") where
         ("dot4_interleaved", dot4_interleaved, (Vector{V}, Vector{T}, Vector{T}, Vector{T}, Vector{T}, Int)),
     )
     println("assembly pressure:")
+    limb_count = T.parameters[2]
     for (label, f, signature) in probes
         native = native_text(f, signature)
         pressure = assembly_pressure(native)
         report_assembly(label, pressure)
-        write_native(outdir, "x$(T.parameters[2])_" * label, native)
+        write_native(outdir, "x$(limb_count)_" * label, native)
     end
     println()
 end
