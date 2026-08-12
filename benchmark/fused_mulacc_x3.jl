@@ -7,12 +7,9 @@ const T3 = Float64x3
 const V3 = MultiFloatVec{4,Float64,3}
 const SINK = Ref{Any}(nothing)
 
-# Reuse the arithmetic-network IR that ships with MultiFloats.jl.  This file is
-# benchmark-only and does not add MFIR to the package runtime dependency graph.
-const _mf_root = dirname(dirname(pathof(MultiFloats)))
-const _mfir_path = joinpath(_mf_root, "scripts", "MFIR.jl")
-isfile(_mfir_path) || error("MultiFloats MFIR script not found at $_mfir_path")
-include(_mfir_path)
+# Benchmark-only MFIR-compatible subset. Nothing here enters the package
+# runtime dependency graph.
+include(joinpath(@__DIR__, "mfir_subset.jl"))
 using .MFIR
 
 # -----------------------------------------------------------------------------
@@ -25,12 +22,6 @@ mutable struct IRBuilder
 end
 
 IRBuilder(num_inputs::Int) = IRBuilder(MFIR.MFIRInstruction[], num_inputs)
-
-@inline function emit1!(builder::IRBuilder, op, a::Int)
-    push!(builder.instructions, MFIR.MFIRInstruction(op, a))
-    builder.next_register += 1
-    return builder.next_register
-end
 
 @inline function emit1!(builder::IRBuilder, op, a::Int, b::Int)
     push!(builder.instructions, MFIR.MFIRInstruction(op, a, b))
@@ -46,8 +37,6 @@ end
 end
 
 function append_mfadd3!(builder::IRBuilder, p0::Int, p1::Int, p2::Int)
-    # Inputs 4:6 are accumulator limbs.  This is exactly the MultiFloats x3
-    # mfadd network, represented in MFIR after the product-side fusion cut.
     a, b = emit2!(builder, MFIR.MFIR_TWO_SUM, 4, p0)
     c, d = emit2!(builder, MFIR.MFIR_TWO_SUM, 5, p1)
     e, f = emit2!(builder, MFIR.MFIR_TWO_SUM, 6, p2)
@@ -68,9 +57,9 @@ function append_mfadd3!(builder::IRBuilder, p0::Int, p1::Int, p2::Int)
 end
 
 function build_tail_program(stage::Symbol)
-    # Inputs:
-    # 1=p00, 2=e00, 3=p01 from the common x3 multiplication prefix,
-    # 4:6=accumulator limbs.
+    # Inputs 1:3 are the common product prefix (p00,e00,p01), and 4:6 are
+    # accumulator limbs. Each fusion stage removes a suffix of product-only
+    # compression before feeding those limbs into the x3 add network.
     builder = IRBuilder(6)
     p0, p1, p2 = 1, 2, 3
     if stage in (:mid, :conservative, :current)
@@ -129,10 +118,8 @@ function print_mfir_summary()
         program = build_tail_program(stage)
         @printf(
             "%-14s %8d %10d %12d\n",
-            String(stage),
-            length(program.instructions),
-            peak_live_registers(program),
-            macro_critical_depth(program),
+            String(stage), length(program.instructions),
+            peak_live_registers(program), macro_critical_depth(program),
         )
     end
     println()
@@ -142,10 +129,7 @@ end
 # Fused arithmetic candidates
 # -----------------------------------------------------------------------------
 
-@inline function raw_mfadd3(
-    x0, x1, x2,
-    y0, y1, y2,
-)
+@inline function raw_mfadd3(x0, x1, x2, y0, y1, y2)
     a, b = MultiFloats.two_sum(x0, y0)
     c, d = MultiFloats.two_sum(x1, y1)
     e, f = MultiFloats.two_sum(x2, y2)
@@ -228,20 +212,17 @@ end
 
 function one_step_case(rng::AbstractRNG, mode::Symbol, i::Int, lane::Int)
     if mode === :random
-        ex = rand(rng, -12:12)
-        ey = rand(rng, -12:12)
+        ex, ey = rand(rng, -12:12), rand(rng, -12:12)
         x = rich_big(rng, ex; sign=rand(rng, Bool) ? 1 : -1)
         y = rich_big(rng, ey; sign=rand(rng, Bool) ? 1 : -1)
         a = rich_big(rng, rand(rng, -12:12); sign=rand(rng, Bool) ? 1 : -1)
     elseif mode === :wide
-        ex = rand(rng, -300:300)
-        ey = rand(rng, -300:300)
+        ex, ey = rand(rng, -300:300), rand(rng, -300:300)
         x = rich_big(rng, ex; sign=rand(rng, Bool) ? 1 : -1)
         y = rich_big(rng, ey; sign=rand(rng, Bool) ? 1 : -1)
         a = rich_big(rng, rand(rng, -500:500); sign=rand(rng, Bool) ? 1 : -1)
     elseif mode === :cancellation
-        ex = rand(rng, -180:180)
-        ey = rand(rng, -180:180)
+        ex, ey = rand(rng, -180:180), rand(rng, -180:180)
         x = rich_big(rng, ex; sign=rand(rng, Bool) ? 1 : -1)
         y = rich_big(rng, ey; sign=rand(rng, Bool) ? 1 : -1)
         product = x * y
@@ -255,8 +236,7 @@ function one_step_case(rng::AbstractRNG, mode::Symbol, i::Int, lane::Int)
         a = rich_big(rng, mod(5i + 3lane, 81) - 40; sign=isodd(lane) ? 1 : -1)
     elseif mode === :edge
         high = isodd(i + lane)
-        ex = high ? 445 : -445
-        ey = high ? 440 : -440
+        ex, ey = high ? 445 : -445, high ? 440 : -440
         x = rich_big(rng, ex; sign=isodd(i) ? 1 : -1)
         y = rich_big(rng, ey; sign=isodd(lane) ? -1 : 1)
         a = rich_big(rng, high ? 870 : -870; sign=isodd(i + lane) ? 1 : -1)
@@ -266,17 +246,16 @@ function one_step_case(rng::AbstractRNG, mode::Symbol, i::Int, lane::Int)
     return T3(a), T3(x), T3(y)
 end
 
+const VALIDATION_MODES = (:random, :wide, :cancellation, :alternating, :edge)
+
 function make_one_step_data(mode::Symbol, n::Int)
-    rng = MersenneTwister(0x31f0 + Int(findfirst(==(mode), (:random, :wide, :cancellation, :alternating, :edge))))
+    index = something(findfirst(==(mode), VALIDATION_MODES), 0)
+    rng = MersenneTwister(0x31f0 + index)
     acc = Vector{V3}(undef, n)
     xs = Vector{V3}(undef, n)
     ys = Vector{V3}(undef, n)
     setprecision(BigFloat, 512) do
         for i in 1:n
-            av = ntuple(lane -> one_step_case(rng, mode, i, lane)[1], Val(4))
-            xv = ntuple(lane -> one_step_case(rng, mode, i, lane)[2], Val(4))
-            yv = ntuple(lane -> one_step_case(rng, mode, i, lane)[3], Val(4))
-            # Regenerate each triple coherently so cancellation mode keeps a/x/y related.
             triples = ntuple(lane -> one_step_case(rng, mode, i, lane), Val(4))
             acc[i] = V3(ntuple(lane -> triples[lane][1], Val(4))...)
             xs[i] = V3(ntuple(lane -> triples[lane][2], Val(4))...)
@@ -285,8 +264,6 @@ function make_one_step_data(mode::Symbol, n::Int)
     end
     return acc, xs, ys
 end
-
-@inline scalar_lane(v::V3, lane::Int) = v[lane]
 
 function normalized_vec(v::V3)
     @inbounds for lane in 1:4
@@ -310,8 +287,9 @@ function validate_one_step(candidate, mode::Symbol; n::Int=384)
                 a = BigFloat(acc[i][lane])
                 x = BigFloat(xs[i][lane])
                 y = BigFloat(ys[i][lane])
-                ref = a + x * y
-                scale = max(abs(a) + abs(x * y), ldexp(one(BigFloat), -1000))
+                product = x * y
+                ref = a + product
+                scale = max(abs(a) + abs(product), ldexp(one(BigFloat), -1000))
                 ec = abs(BigFloat(current[lane]) - ref) / scale
                 ef = abs(BigFloat(fused[lane]) - ref) / scale
                 max_current_scaled = max(max_current_scaled, ec)
@@ -324,17 +302,14 @@ function validate_one_step(candidate, mode::Symbol; n::Int=384)
         (iszero(max_candidate_scaled) ? 1.0 : Inf) :
         Float64(max_candidate_scaled / max_current_scaled)
     return (
-        current=max_current_scaled,
-        fused=max_candidate_scaled,
-        ratio=ratio,
-        worse=worse,
-        nonnormalized=nonnormalized,
-        total=4n,
+        current=max_current_scaled, fused=max_candidate_scaled, ratio=ratio,
+        worse=worse, nonnormalized=nonnormalized, total=4n,
     )
 end
 
 function make_dot_data(mode::Symbol, n::Int)
-    rng = MersenneTwister(0xd07 + Int(findfirst(==(mode), (:random, :wide, :cancellation, :alternating, :edge))))
+    index = something(findfirst(==(mode), VALIDATION_MODES), 0)
+    rng = MersenneTwister(0xd07 + index)
     xs = Vector{V3}(undef, n)
     ys = Vector{V3}(undef, n)
     setprecision(BigFloat, 512) do
@@ -353,9 +328,7 @@ function make_dot_data(mode::Symbol, n::Int)
                 end
                 bx = rich_big(rng, ex; sign=rand(rng, Bool) ? 1 : -1)
                 by = rich_big(rng, ey; sign=rand(rng, Bool) ? 1 : -1)
-                if mode === :alternating
-                    by *= isodd(i) ? one(BigFloat) : -one(BigFloat)
-                end
+                mode === :alternating && (by *= isodd(i) ? one(BigFloat) : -one(BigFloat))
                 xv[lane] = T3(bx)
                 yv[lane] = T3(by)
             end
@@ -464,18 +437,15 @@ end
 
 function main()
     println("Float64x3 MFIR fused mulacc prototype")
-    println("Julia=$(VERSION) arch=$(Sys.ARCH) threads=$(Threads.nthreads()) MultiFloats=3.2.6")
+    println("Julia=$(VERSION) arch=$(Sys.ARCH) threads=$(Threads.nthreads())")
     println()
     print_mfir_summary()
-
-    modes = (:random, :wide, :cancellation, :alternating, :edge)
-    accepted_accuracy = Dict{Symbol,Bool}()
 
     for (name, candidate) in pairs(CANDIDATES)
         println("== candidate: $name ==")
         accuracy_ok = true
         @printf("%-14s %12s %12s %9s %10s %10s\n", "mode", "current", "fused", "ratio", "worse", "non-norm")
-        for mode in modes
+        for mode in VALIDATION_MODES
             stats = validate_one_step(candidate, mode)
             @printf(
                 "%-14s %12.3e %12.3e %9.3f %10d %10d\n",
@@ -488,7 +458,7 @@ function main()
 
         println("dot differential:")
         @printf("%-14s %12s %12s %9s %10s\n", "mode", "current", "fused", "ratio", "normalized")
-        for mode in modes
+        for mode in VALIDATION_MODES
             stats = validate_dot(candidate, mode)
             @printf(
                 "%-14s %12.3e %12.3e %9.3f %10s\n",
@@ -498,7 +468,6 @@ function main()
             accuracy_ok &= stats.normalized
             accuracy_ok &= stats.ratio <= 1.05
         end
-        accepted_accuracy[name] = accuracy_ok
 
         perf = benchmark_dot(candidate)
         @printf(
