@@ -26,16 +26,26 @@ jobs:
       - name: Profile scalar and SIMD MultiFloat arithmetic
         env:
           MFLA_PROFILE_OUT: arithmetic-codegen
-        run: julia -t 1 --project=benchmark benchmark/arithmetic_profile.jl 4096 16 5 | tee arithmetic-profile.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          julia -t 1 --project=benchmark benchmark/arithmetic_profile.jl 4096 16 5 | tee arithmetic-profile.txt
       - name: Profile GEMM accumulator pressure
         env:
           MFLA_PRESSURE_OUT: accumulator-codegen
-        run: julia -t 1 --project=benchmark benchmark/accumulator_pressure.jl 2048 16 5 | tee accumulator-pressure.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          julia -t 1 --project=benchmark benchmark/accumulator_pressure.jl 2048 16 5 | tee accumulator-pressure.txt
       - name: Test magnitude-ordered FastTwoSum network
         env:
           MFLA_ORDERED_OUT: ordered-twosum-codegen
-        run: julia -t 1 --project=benchmark benchmark/ordered_twosum.jl | tee ordered-twosum.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          julia -t 1 --project=benchmark benchmark/ordered_twosum.jl | tee ordered-twosum.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: arithmetic-profile
           path: |
