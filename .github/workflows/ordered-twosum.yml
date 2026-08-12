@@ -1,0 +1,37 @@
+name: Ordered TwoSum Experiment
+
+on:
+  pull_request:
+    paths:
+      - "benchmark/ordered_twosum.jl"
+      - ".github/workflows/ordered-twosum.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ordered-twosum:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate benchmark environment
+        run: julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+      - name: Run ordered TwoSum experiment
+        shell: bash
+        env:
+          MFLA_ORDERED_OUT: ordered-twosum-codegen
+        run: |
+          set -o pipefail
+          julia -t 1 --project=benchmark benchmark/ordered_twosum.jl | tee ordered-twosum.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ordered-twosum
+          path: |
+            ordered-twosum.txt
+            ordered-twosum-codegen/
