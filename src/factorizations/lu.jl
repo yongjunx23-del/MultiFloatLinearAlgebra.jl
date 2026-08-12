@@ -106,6 +106,10 @@ function lu!(
     m, n = size(A)
     _check_supported(MF)
     kmax = min(m, n)
+    if !_all_finite(A)
+        check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))
+        return MFLU{MF,typeof(A)}(A, collect(1:kmax), -1)
+    end
     ipiv = Vector{Int}(undef, kmax)
     info = 0
     block = max(config.lu_block, 1)

@@ -1,29 +1,44 @@
+"""
+    ldiv!(destination, F; config=KernelConfig())
+
+Solve the factorized system represented by `F` in place, overwriting
+`destination` with the solution. A single right-hand side vector or a matrix
+of right-hand sides is accepted. `F` must be successful (`issuccess(F)`),
+otherwise a `PosDefException` or `SingularException` is thrown.
+
+Dispatch selects the triangular solve for `MFCholesky`, `MFLU`, or `MFLDLT`.
+Vector right-hand sides are solved through the same package `trsm!` kernel as
+matrix right-hand sides by treating them as a single column.
+"""
 function ldiv!(
     destination::AbstractVector{MF},
     F::MFCholesky{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
-    A = F.factors
-    n = size(A, 1)
+    n = size(F.factors, 1)
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
 
-    @inbounds for row in 1:n
-        value = destination[row]
-        for column in 1:(row - 1)
-            value -= A[row, column] * destination[column]
-        end
-        destination[row] = value / A[row, row]
-    end
-
-    @inbounds for row in n:-1:1
-        value = destination[row]
-        for column in (row + 1):n
-            value -= A[column, row] * destination[column]
-        end
-        destination[row] = value / A[row, row]
-    end
+    rhs = reshape(destination, n, 1)
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:lower,
+        trans=:N,
+        diag=:nonunit,
+        config=config,
+    )
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:lower,
+        trans=:T,
+        diag=:nonunit,
+        config=config,
+    )
     return destination
 end
 
@@ -99,21 +114,25 @@ function ldiv!(
         throw(DimensionMismatch("right-hand side length differs"))
     _apply_pivots!(destination, F.ipiv)
 
-    @inbounds for row in 1:n
-        value = destination[row]
-        for column in 1:(row - 1)
-            value -= A[row, column] * destination[column]
-        end
-        destination[row] = value
-    end
-
-    @inbounds for row in n:-1:1
-        value = destination[row]
-        for column in (row + 1):n
-            value -= A[row, column] * destination[column]
-        end
-        destination[row] = value / A[row, row]
-    end
+    rhs = reshape(destination, n, 1)
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:lower,
+        trans=:N,
+        diag=:unit,
+        config=config,
+    )
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:upper,
+        trans=:N,
+        diag=:nonunit,
+        config=config,
+    )
     return destination
 end
 
@@ -271,21 +290,26 @@ function ldiv!(
         throw(DimensionMismatch("right-hand side length differs"))
     _apply_ldlt_pivots_forward!(destination, F)
 
-    @inbounds for row in 1:n
-        value = destination[row]
-        for column in 1:(row - 1)
-            value -= F.factors[row, column] * destination[column]
-        end
-        destination[row] = value
-    end
+    rhs = reshape(destination, n, 1)
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:lower,
+        trans=:N,
+        diag=:unit,
+        config=config,
+    )
     _ldlt_solve_d!(destination, F)
-    @inbounds for row in n:-1:1
-        value = destination[row]
-        for column in (row + 1):n
-            value -= F.factors[column, row] * destination[column]
-        end
-        destination[row] = value
-    end
+    trsm!(
+        rhs,
+        F.factors;
+        side=:left,
+        uplo=:lower,
+        trans=:T,
+        diag=:unit,
+        config=config,
+    )
 
     _apply_ldlt_pivots_reverse!(destination, F)
     return destination
@@ -323,6 +347,12 @@ function ldiv!(
     return destination
 end
 
+"""
+    solve(F, rhs; config=KernelConfig())
+
+Solve the factorized system `F` for `rhs` and return a new array. This is the
+non-mutating wrapper around `ldiv!` that copies `rhs` first.
+"""
 solve(
     F::Union{MFCholesky,MFLU,MFLDLT},
     rhs::AbstractVector;

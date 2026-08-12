@@ -71,6 +71,10 @@ function cholesky!(
     n, m = size(A)
     n == m || throw(DimensionMismatch("cholesky! requires a square matrix"))
     _check_supported(MF)
+    if !_lower_triangle_finite(A)
+        check && throw(DomainError(A, "cholesky!: input matrix contains non-finite entries"))
+        return MFCholesky{MF,typeof(A)}(A, -1)
+    end
 
     block = max(config.cholesky_block, 1)
     info = 0

@@ -1,19 +1,27 @@
-function _cpu_model_fingerprint()
+function _cpu_info_snapshot()
     info = try
         Sys.cpu_info()
     catch
-        return "unknown"
+        return nothing
     end
-    isempty(info) && return "unknown"
-    return string(first(info).model)
+    isempty(info) && return nothing
+    first_cpu = first(info)
+    return (
+        model=string(first_cpu.model),
+        speed_mhz=Int(first_cpu.speed),
+        cores=length(info),
+    )
 end
 
 function machine_fingerprint(; thread_count::Int=Threads.nthreads())
+    cpu = _cpu_info_snapshot()
     return (
         arch=Sys.ARCH,
         kernel=Sys.KERNEL,
         word_size=Sys.WORD_SIZE,
-        cpu_model=_cpu_model_fingerprint(),
+        cpu_model=cpu === nothing ? "unknown" : cpu.model,
+        cpu_speed_mhz=cpu === nothing ? 0 : cpu.speed_mhz,
+        cpu_cores=cpu === nothing ? 0 : cpu.cores,
         julia=VERSION,
         julia_threads=max(thread_count, 1),
     )

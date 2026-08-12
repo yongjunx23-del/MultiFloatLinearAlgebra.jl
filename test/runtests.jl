@@ -3,6 +3,7 @@ using Random
 using LinearAlgebra
 using MultiFloats
 using MultiFloatLinearAlgebra
+using Aqua
 
 Random.seed!(0x5eed)
 
@@ -360,6 +361,152 @@ end
                     zeros(T, crossing_n),
                 ) <= tolerance(T, 256crossing_n)
             end
+
+            @testset "non-finite input" begin
+                Anan = T.(randn(n, n))
+
+                Alu = copy(Anan)
+                Alu[1, 1] = T(NaN)
+                @test_throws DomainError MultiFloatLinearAlgebra.lu!(Alu; config=config)
+                Alu = copy(Anan)
+                Alu[1, 1] = T(NaN)
+                Flu = MultiFloatLinearAlgebra.lu!(Alu; check=false, config=config)
+                @test !MultiFloatLinearAlgebra.issuccess(Flu)
+                @test Flu.info == -1
+
+                Alu = copy(Anan)
+                Alu[1, 1] = T(Inf)
+                @test_throws DomainError MultiFloatLinearAlgebra.lu!(Alu; config=config)
+
+                R = randn(n, n)
+                S = R * transpose(R) + n * I
+                Aspd = T.(Matrix(S))
+                Aspd[2, 2] = T(NaN)
+                @test_throws DomainError MultiFloatLinearAlgebra.cholesky!(Aspd; config=config)
+                Aspd = T.(Matrix(S))
+                Aspd[2, 2] = T(NaN)
+                Fc = MultiFloatLinearAlgebra.cholesky!(Aspd; check=false, config=config)
+                @test !MultiFloatLinearAlgebra.issuccess(Fc)
+                @test Fc.info == -1
+
+                Rind = randn(n, n)
+                Sind = Rind + transpose(Rind)
+                for i in 1:n
+                    Sind[i, i] += isodd(i) ? 5 : -5
+                end
+                Aind = T.(Matrix(Sind))
+                Aind[1, 1] = T(NaN)
+                @test_throws DomainError MultiFloatLinearAlgebra.ldlt!(Aind; config=config)
+                Aind = T.(Matrix(Sind))
+                Aind[1, 1] = T(NaN)
+                Fld = MultiFloatLinearAlgebra.ldlt!(Aind; check=false, config=config)
+                @test !MultiFloatLinearAlgebra.issuccess(Fld)
+                @test Fld.info == -1
+            end
+
+            @testset "alpha/beta kernels" begin
+                A = T.(randn(n, n))
+                B = T.(randn(n, n))
+                C0 = T.(randn(n, n))
+                C = copy(C0)
+                MultiFloatLinearAlgebra.gemm!(C, A, B, T(2), T(3); config=config)
+                @test max_relative_error(C, T(2) * (A * B) + T(3) * C0) <=
+                    tolerance(T, n)
+
+                x = T.(randn(n))
+                y0 = T.(randn(n))
+                y = copy(y0)
+                MultiFloatLinearAlgebra.gemv!(y, A, x, T(2), T(3); config=config)
+                @test max_relative_error(y, T(2) * (A * x) + T(3) * y0) <=
+                    tolerance(T, n)
+            end
+
+            @testset "check=false singular" begin
+                Ssing = zeros(T, n, n)
+                Ssing[2, 2] = T(1)
+                Flu = MultiFloatLinearAlgebra.lu!(copy(Ssing); check=false, config=config)
+                @test !MultiFloatLinearAlgebra.issuccess(Flu)
+                @test Flu.info >= 1
+                @test_throws LinearAlgebra.SingularException MultiFloatLinearAlgebra.lu!(
+                    copy(Ssing); check=true, config=config,
+                )
+
+                Aindef = T.([1 2; 2 1])
+                Fc = MultiFloatLinearAlgebra.cholesky!(copy(Aindef); check=false, config=config)
+                @test !MultiFloatLinearAlgebra.issuccess(Fc)
+                @test Fc.info >= 1
+            end
+
+            @testset "single-thread path" begin
+                single = KernelConfig(
+                    thread_count=1,
+                    cholesky_block=4,
+                    lu_block=4,
+                    column_tile=4,
+                )
+                A = T.(randn(n, n))
+                B = T.(randn(n, n))
+                C = zeros(T, n, n)
+                MultiFloatLinearAlgebra.gemm!(C, A, B; config=single)
+                @test max_relative_error(C, A * B) <= tolerance(T, n)
+
+                R = randn(n, n)
+                S = R * transpose(R) + n * I
+                Aspd = T.(Matrix(S))
+                original = copy(Aspd)
+                F = MultiFloatLinearAlgebra.cholesky!(Aspd; config=single)
+                rhs = T.(randn(n))
+                rhs_original = copy(rhs)
+                solution = MultiFloatLinearAlgebra.solve(F, rhs; config=single)
+                @test max_relative_error(original * solution - rhs_original, zeros(T, n)) <=
+                    tolerance(T, 128n)
+            end
+
+            @testset "vector/matrix solve equivalence" begin
+                R = randn(n, n)
+                S = R * transpose(R) + n * I
+                Aspd = T.(Matrix(S))
+                Fc = MultiFloatLinearAlgebra.cholesky!(Aspd; config=config)
+                b = T.(randn(n))
+                xv = MultiFloatLinearAlgebra.solve(Fc, b; config=config)
+                xm = MultiFloatLinearAlgebra.solve(
+                    Fc, reshape(copy(b), n, 1); config=config,
+                )
+                @test xv == vec(xm)
+
+                Alu = T.(randn(n, n))
+                for i in 1:n
+                    Alu[i, i] += T(4)
+                end
+                Flu = MultiFloatLinearAlgebra.lu!(Alu; config=config)
+                yv = MultiFloatLinearAlgebra.solve(Flu, b; config=config)
+                ym = MultiFloatLinearAlgebra.solve(
+                    Flu, reshape(copy(b), n, 1); config=config,
+                )
+                @test yv == vec(ym)
+
+                Rind = randn(n, n)
+                Sind = Rind + transpose(Rind)
+                for i in 1:n
+                    Sind[i, i] += isodd(i) ? 5 : -5
+                end
+                Aind = T.(Matrix(Sind))
+                Fld = MultiFloatLinearAlgebra.ldlt!(Aind; config=config)
+                zv = MultiFloatLinearAlgebra.solve(Fld, b; config=config)
+                zm = MultiFloatLinearAlgebra.solve(
+                    Fld, reshape(copy(b), n, 1); config=config,
+                )
+                @test zv == vec(zm)
+            end
         end
+    end
+
+    @testset "Aqua" begin
+        Aqua.test_all(
+            MultiFloatLinearAlgebra;
+            piracies=false,
+            stale_deps=true,
+            deps_compat=true,
+        )
     end
 end

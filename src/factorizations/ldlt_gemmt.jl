@@ -1,5 +1,5 @@
 function _ldlt_block_trailing_update!(
-    A::StridedMatrix{MF},
+    A::AbstractMatrix{MF},
     panel_first::Int,
     panel_last::Int,
     weighted_storage::Matrix{MF},
@@ -34,7 +34,7 @@ function _ldlt_block_trailing_update!(
 end
 
 function _factor_ldlt_blocked!(
-    A::StridedMatrix{MF},
+    A::AbstractMatrix{MF},
     dsub::Vector{MF},
     pivots::Vector{Int},
     blocks::Vector{UInt8},

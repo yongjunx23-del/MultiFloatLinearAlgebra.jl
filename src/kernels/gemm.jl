@@ -18,6 +18,12 @@ end
 Resolve the inspectable dense-GEMM route. `:auto` never benchmarks implicitly;
 it uses the stored crossover and the type-specific panel/microkernel defaults.
 Use `calibrate_gemm` to produce a machine-specific profile explicitly.
+
+`gemm_packed_crossover` is expressed as an equivalent square edge length: the
+packed route is eligible once the total `m*k*n` work reaches `crossover^3` and
+the reduction dimension `k` is at least half that edge. This keeps the same
+threshold for square GEMM (`m == k == n`) while scaling sensibly for tall or
+wide shapes.
 """
 function gemm_plan(
     ::Type{MF},
@@ -65,6 +71,8 @@ function gemm_plan(
         )
     end
 
+    # crossover is an equivalent square edge length; compare total work against
+    # its cube so non-square shapes use the same volume-based trigger.
     crossover = max(config.gemm_packed_crossover, 1)
     work = Float64(max(m, 0)) * Float64(max(k, 0)) * Float64(max(n, 0))
     minimum_reduction = max(32, crossover ÷ 2)
@@ -248,84 +256,6 @@ function _pack_b_panel!(
         end
     end
     return width
-end
-
-@inline function _packed_gemm_vector_block!(
-    C::AbstractMatrix{MF},
-    A::AbstractMatrix{MF},
-    packed_b::AbstractVector{MF},
-    width::Int,
-    row::Int,
-    local_column::Int,
-    global_column::Int,
-    alpha::MF,
-    beta::MF,
-    ::Val{NR},
-) where {T,N,MF<:MultiFloat{T,N},NR}
-    V4 = MultiFloatVec{4,T,N}
-    accumulators = ntuple(_ -> zero(V4), Val(NR))
-    reduction = size(A, 2)
-    @inbounds for k in 1:reduction
-        values = V4(
-            A[row, k],
-            A[row + 1, k],
-            A[row + 2, k],
-            A[row + 3, k],
-        )
-        offset = (k - 1) * width + local_column - 1
-        accumulators = ntuple(
-            column -> accumulators[column] +
-                      values * V4(packed_b[offset + column]),
-            Val(NR),
-        )
-    end
-
-    alpha_vector = V4(alpha)
-    beta_vector = V4(beta)
-    @inbounds for column in 1:NR
-        output_column = global_column + column - 1
-        result = alpha_vector * accumulators[column] + beta_vector * V4(
-            C[row, output_column],
-            C[row + 1, output_column],
-            C[row + 2, output_column],
-            C[row + 3, output_column],
-        )
-        for lane in 1:4
-            C[row + lane - 1, output_column] = result[lane]
-        end
-    end
-    return nothing
-end
-
-@inline function _packed_gemm_scalar_block!(
-    C::AbstractMatrix{MF},
-    A::AbstractMatrix{MF},
-    packed_b::AbstractVector{MF},
-    width::Int,
-    row::Int,
-    local_column::Int,
-    global_column::Int,
-    alpha::MF,
-    beta::MF,
-    ::Val{NR},
-) where {MF<:MultiFloat,NR}
-    accumulators = ntuple(_ -> zero(MF), Val(NR))
-    reduction = size(A, 2)
-    @inbounds for k in 1:reduction
-        value = A[row, k]
-        offset = (k - 1) * width + local_column - 1
-        accumulators = ntuple(
-            column -> accumulators[column] +
-                      value * packed_b[offset + column],
-            Val(NR),
-        )
-    end
-    @inbounds for column in 1:NR
-        output_column = global_column + column - 1
-        C[row, output_column] =
-            alpha * accumulators[column] + beta * C[row, output_column]
-    end
-    return nothing
 end
 
 function _packed_gemm_column_group!(

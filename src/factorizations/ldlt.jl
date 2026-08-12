@@ -188,22 +188,13 @@ function _ldlt_rank2_update!(
     return nothing
 end
 
-@inline function _resolved_ldlt_block(
-    ::Type{MF},
-    config::KernelConfig,
-) where {MF<:MultiFloat}
-    config.ldlt_block > 0 && return config.ldlt_block
-    limbs = _limb_count(MF)
-    return limbs <= 2 ? 32 : limbs == 3 ? 24 : 16
-end
-
 """
     ldlt_plan(T, n, config=KernelConfig())
 
 Resolve whether LDLT uses the robust scalar right-looking path or the lazy
 blocked panel path. The blocked panel performs the same Bunch--Kaufman pivot
 search on the current Schur complement, but defers its trailing update to one
-package-level GEMM call.
+package-level `gemmt!` triangular-update call.
 """
 function ldlt_plan(
     ::Type{MF},
@@ -500,89 +491,6 @@ function _build_ldlt_weighted_panel!(
     return weighted
 end
 
-function _ldlt_block_trailing_update!(
-    A::AbstractMatrix{MF},
-    panel_first::Int,
-    panel_last::Int,
-    weighted_storage::Matrix{MF},
-    dsub::Vector{MF},
-    blocks::Vector{UInt8},
-    config::KernelConfig,
-    gemm_workspace::GemmWorkspace{MF},
-) where {MF<:MultiFloat}
-    n = size(A, 1)
-    panel_last < n || return nothing
-    trailing_count = n - panel_last
-    panel_width = panel_last - panel_first + 1
-    weighted = @view weighted_storage[1:trailing_count, 1:panel_width]
-    _build_ldlt_weighted_panel!(
-        weighted, A, panel_first, panel_last, dsub, blocks,
-    )
-    L21 = @view A[(panel_last + 1):n, panel_first:panel_last]
-    A22 = @view A[(panel_last + 1):n, (panel_last + 1):n]
-    gemm!(
-        A22,
-        L21,
-        transpose(weighted),
-        -one(MF),
-        one(MF);
-        config=config,
-        workspace=gemm_workspace,
-    )
-    _mirror_lower_to_upper!(A22)
-    return nothing
-end
-
-function _factor_ldlt_blocked!(
-    A::AbstractMatrix{MF},
-    dsub::Vector{MF},
-    pivots::Vector{Int},
-    blocks::Vector{UInt8},
-    alpha::MF,
-    plan::LDLTPlan,
-    config::KernelConfig,
-) where {MF<:MultiFloat}
-    n = size(A, 1)
-    weighted_storage = Matrix{MF}(undef, n, plan.block_size + 1)
-    gemm_workspace = GemmWorkspace(
-        MF;
-        thread_count=config.thread_count,
-        capacity=n * max(
-            config.gemm_panel_columns > 0 ?
-            config.gemm_panel_columns :
-            _default_gemm_panel_columns(MF, config.thread_count),
-            1,
-        ),
-    )
-
-    panel_first = 1
-    while panel_first <= n
-        requested_last = min(panel_first + plan.block_size - 1, n)
-        info, panel_last = _factor_ldlt_panel!(
-            A,
-            panel_first,
-            requested_last,
-            dsub,
-            pivots,
-            blocks,
-            alpha,
-        )
-        !iszero(info) && return info
-        _ldlt_block_trailing_update!(
-            A,
-            panel_first,
-            panel_last,
-            weighted_storage,
-            dsub,
-            blocks,
-            config,
-            gemm_workspace,
-        )
-        panel_first = panel_last + 1
-    end
-    return 0
-end
-
 """
     ldlt!(A; check=true, config=KernelConfig())
 
@@ -592,7 +500,7 @@ the Bunch--Kaufman threshold strategy and may use 1x1 or 2x2 diagonal blocks.
 
 The blocked route keeps the panel Schur complement lazy: each pivot column and
 candidate pivot row is evaluated against all earlier pivots in that panel,
-then one `L21 * (L21*D)'` GEMM updates the trailing matrix. Thus blocking does
+then one `L21 * (L21*D)'` `gemmt!` updates the trailing matrix. Thus blocking does
 not weaken the pivot search or silently fall back to a no-pivot factorization.
 
 On return, the strict lower triangle stores unit-lower `L`, the diagonal stores
@@ -608,6 +516,10 @@ function ldlt!(
     n == m || throw(DimensionMismatch("ldlt! requires a square matrix"))
     _check_supported(MF)
     _mirror_lower_to_upper!(A)
+    if !_lower_triangle_finite(A)
+        check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))
+        return MFLDLT{MF,typeof(A)}(A, zeros(MF, n), collect(1:n), zeros(UInt8, n), -1)
+    end
 
     dsub = zeros(MF, n)
     pivots = collect(1:n)

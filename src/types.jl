@@ -34,6 +34,9 @@ packing storage.
 """
 mutable struct GemmWorkspace{MF<:MultiFloat}
     buffers::Vector{Vector{MF}}
+    function GemmWorkspace{MF}(buffers::Vector{Vector{MF}}) where {MF<:MultiFloat}
+        return new{MF}(buffers)
+    end
 end
 
 function GemmWorkspace(
@@ -101,6 +104,25 @@ end
     MultiFloatVec{4,T,N}
 
 @inline _limb_count(::Type{MultiFloat{T,N}}) where {T,N} = N
+
+@inline function _all_finite(A::AbstractArray)
+    @inbounds for index in eachindex(A)
+        isfinite(A[index]) || return false
+    end
+    return true
+end
+
+@inline function _lower_triangle_finite(A::AbstractMatrix)
+    rows = axes(A, 1)
+    columns = axes(A, 2)
+    @inbounds for column in columns
+        for row in rows
+            row >= column || continue
+            isfinite(A[row, column]) || return false
+        end
+    end
+    return true
+end
 
 function _prepare_gemm_workspace!(
     workspace::GemmWorkspace{MF},
