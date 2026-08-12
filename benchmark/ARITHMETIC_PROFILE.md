@@ -176,7 +176,9 @@ bitwise equal to the established direct GEMM result.
 This is a genuine scheduling opportunity for x2, but not for x3/x4. The x2
 candidate should be compared against B-packed GEMM in the **same benchmark
 run** before changing the machine calibration policy because hosted-runner
-variance is large enough to invalidate comparisons across runs.
+variance is large enough to invalidate comparisons across runs. A production
+x2 direct-four kernel is therefore a separate follow-up, not part of this raw
+x3/x4 arithmetic decision.
 
 For x3/x4, simple output-column unrolling has now also been exhausted: it does
 not clear the 5% gate at either 512 or 1024.
