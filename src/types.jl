@@ -1,19 +1,87 @@
 """
-    KernelConfig(; reduction_tile=64, column_tile=16, cholesky_block=16,
-                 lu_block=16, thread_count=Threads.nthreads())
+    KernelConfig(; ...)
 
-Cache/thread geometry for MultiFloat kernels.
-
-The defaults are conservative and intentionally independent of any solver.
-Applications may keep one configuration per machine or benchmark-tune these
-values without changing the numerical API.
+Explicit cache, threading, and route configuration for MultiFloat kernels.
+The package never runs hidden machine calibration: `:auto` resolves from the
+stored thresholds and type-specific defaults, while `calibrate_gemm` returns a
+reproducible profile that callers may apply with `with_gemm_profile`.
 """
 Base.@kwdef struct KernelConfig
     reduction_tile::Int = 64
     column_tile::Int = 16
     cholesky_block::Int = 16
     lu_block::Int = 16
+    ldlt_block::Int = 0
+    ldlt_strategy::Symbol = :auto
+    ldlt_blocked_crossover::Int = 64
     thread_count::Int = Threads.nthreads()
+    gemm_strategy::Symbol = :auto
+    gemm_packed_crossover::Int = 192
+    gemm_panel_columns::Int = 0
+    gemm_micro_columns::Int = 0
+end
+
+"""
+    GemmWorkspace(T; thread_count=Threads.nthreads(), capacity=0)
+
+Reusable caller-owned packed-panel buffers. One buffer is reserved for each
+possible compute worker so concurrent output-column owners never share mutable
+packing storage.
+"""
+mutable struct GemmWorkspace{MF<:MultiFloat}
+    buffers::Vector{Vector{MF}}
+end
+
+function GemmWorkspace(
+    ::Type{MF};
+    thread_count::Int=Threads.nthreads(),
+    capacity::Int=0,
+) where {MF<:MultiFloat}
+    workers = max(thread_count, 1)
+    initial_capacity = max(capacity, 0)
+    buffers = Vector{Vector{MF}}(undef, workers)
+    @inbounds for worker in 1:workers
+        buffers[worker] = Vector{MF}(undef, initial_capacity)
+    end
+    return GemmWorkspace{MF}(buffers)
+end
+
+struct GemmPlan
+    strategy::Symbol
+    reason::Symbol
+    panel_columns::Int
+    micro_columns::Int
+    workers::Int
+    packed_elements_per_worker::Int
+end
+
+struct LDLTPlan
+    strategy::Symbol
+    reason::Symbol
+    block_size::Int
+end
+
+struct GemmProfile{MF<:MultiFloat}
+    strategy::Symbol
+    panel_columns::Int
+    micro_columns::Int
+    packed_crossover::Int
+    thread_count::Int
+    source::Symbol
+    fingerprint::NamedTuple
+end
+
+struct GemmMeasurement
+    size::Int
+    strategy::Symbol
+    panel_columns::Int
+    micro_columns::Int
+    seconds::Float64
+end
+
+struct GemmCalibration{MF<:MultiFloat}
+    profile::GemmProfile{MF}
+    measurements::Vector{GemmMeasurement}
 end
 
 @inline _workers(config::KernelConfig, jobs::Int) =
@@ -26,3 +94,21 @@ end
 
 @inline _vec4_type(::Type{MultiFloat{T,N}}) where {T,N} =
     MultiFloatVec{4,T,N}
+
+@inline _limb_count(::Type{MultiFloat{T,N}}) where {T,N} = N
+
+function _prepare_gemm_workspace!(
+    workspace::GemmWorkspace{MF},
+    workers::Int,
+    capacity::Int,
+) where {MF<:MultiFloat}
+    required_workers = max(workers, 1)
+    while length(workspace.buffers) < required_workers
+        push!(workspace.buffers, Vector{MF}(undef, max(capacity, 0)))
+    end
+    @inbounds for worker in 1:required_workers
+        buffer = workspace.buffers[worker]
+        length(buffer) >= capacity || resize!(buffer, capacity)
+    end
+    return workspace
+end

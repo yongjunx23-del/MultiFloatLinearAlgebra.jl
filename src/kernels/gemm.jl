@@ -1,3 +1,87 @@
+@inline function _default_gemm_panel_columns(
+    ::Type{MultiFloat{T,N}},
+    threads::Int,
+) where {T,N}
+    base = N <= 1 ? 48 : N == 2 ? 32 : N == 3 ? 24 : 16
+    return threads >= 8 ? max(12, base * 3 ÷ 4) : base
+end
+
+@inline function _default_gemm_micro_columns(
+    ::Type{MultiFloat{T,N}},
+) where {T,N}
+    return N <= 3 ? 4 : 2
+end
+
+"""
+    gemm_plan(T, m, k, n, config=KernelConfig())
+
+Resolve the inspectable dense-GEMM route. `:auto` never benchmarks implicitly;
+it uses the stored crossover and the type-specific panel/microkernel defaults.
+Use `calibrate_gemm` to produce a machine-specific profile explicitly.
+"""
+function gemm_plan(
+    ::Type{MF},
+    m::Int,
+    k::Int,
+    n::Int,
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    _check_supported(MF)
+    strategy = config.gemm_strategy
+    strategy in (:auto, :direct, :packed) ||
+        throw(ArgumentError("gemm_strategy must be :auto, :direct, or :packed"))
+
+    panel_columns = config.gemm_panel_columns > 0 ?
+                    config.gemm_panel_columns :
+                    _default_gemm_panel_columns(MF, config.thread_count)
+    panel_columns = max(panel_columns, 1)
+    requested_micro = config.gemm_micro_columns > 0 ?
+                      config.gemm_micro_columns :
+                      _default_gemm_micro_columns(MF)
+    requested_micro in (1, 2, 4) ||
+        throw(ArgumentError("gemm_micro_columns must be 1, 2, or 4"))
+    micro_columns = min(requested_micro, panel_columns)
+    micro_columns = micro_columns >= 4 ? 4 : micro_columns >= 2 ? 2 : 1
+    jobs = cld(max(n, 0), panel_columns)
+    workers = _workers(config, jobs)
+
+    if strategy === :direct
+        return GemmPlan(
+            :direct,
+            :forced_direct,
+            panel_columns,
+            micro_columns,
+            workers,
+            0,
+        )
+    elseif strategy === :packed
+        return GemmPlan(
+            :packed,
+            :forced_packed,
+            panel_columns,
+            micro_columns,
+            workers,
+            max(k, 0) * panel_columns,
+        )
+    end
+
+    crossover = max(config.gemm_packed_crossover, 1)
+    work = Float64(max(m, 0)) * Float64(max(k, 0)) * Float64(max(n, 0))
+    minimum_reduction = max(32, crossover ÷ 2)
+    use_packed =
+        k >= minimum_reduction &&
+        n >= micro_columns &&
+        work >= Float64(crossover)^3
+    return GemmPlan(
+        use_packed ? :packed : :direct,
+        use_packed ? :auto_above_crossover : :auto_below_crossover,
+        panel_columns,
+        micro_columns,
+        workers,
+        use_packed ? max(k, 0) * panel_columns : 0,
+    )
+end
+
 @inline function _gemm_store_pair!(
     C::AbstractMatrix{MF},
     A::AbstractMatrix{MF},
@@ -40,7 +124,7 @@
     return nothing
 end
 
-function _gemm_column_range!(
+function _gemm_direct_column_range!(
     C::AbstractMatrix{MF},
     A::AbstractMatrix{MF},
     B::AbstractMatrix{MF},
@@ -112,12 +196,347 @@ function _gemm_column_range!(
     return nothing
 end
 
-"""
-    gemm!(C, A, B, alpha=one(eltype(A)), beta=zero(eltype(A)); config=KernelConfig())
+function _gemm_direct!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractMatrix{MF},
+    alpha::MF,
+    beta::MF,
+    plan::GemmPlan,
+) where {MF<:MultiFloat}
+    n = size(B, 2)
+    jobs = cld(n, plan.panel_columns)
+    workers = plan.workers
+    if workers == 1 || jobs <= 1
+        _gemm_direct_column_range!(C, A, B, alpha, beta, 1, n)
+        return C
+    end
 
-CPU matrix multiplication specialized for `MultiFloat{T,N}`. The hot path
-maps four independent output rows into `MultiFloatVec{4,T,N}` lanes and pairs
-two output columns to reuse every `A` load. Threads own disjoint column tiles.
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            for job in worker:workers:jobs
+                first_column = (job - 1) * plan.panel_columns + 1
+                last_column = min(job * plan.panel_columns, n)
+                _gemm_direct_column_range!(
+                    C,
+                    A,
+                    B,
+                    alpha,
+                    beta,
+                    first_column,
+                    last_column,
+                )
+            end
+        end
+    end
+    return C
+end
+
+function _pack_b_panel!(
+    destination::AbstractVector{MF},
+    B::AbstractMatrix{MF},
+    first_column::Int,
+    last_column::Int,
+) where {MF<:MultiFloat}
+    width = last_column - first_column + 1
+    reduction = size(B, 1)
+    @inbounds for k in 1:reduction
+        offset = (k - 1) * width
+        for local_column in 1:width
+            destination[offset + local_column] =
+                B[k, first_column + local_column - 1]
+        end
+    end
+    return width
+end
+
+@inline function _packed_gemm_vector_block!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    packed_b::AbstractVector{MF},
+    width::Int,
+    row::Int,
+    local_column::Int,
+    global_column::Int,
+    alpha::MF,
+    beta::MF,
+    ::Val{NR},
+) where {T,N,MF<:MultiFloat{T,N},NR}
+    V4 = MultiFloatVec{4,T,N}
+    accumulators = ntuple(_ -> zero(V4), Val(NR))
+    reduction = size(A, 2)
+    @inbounds for k in 1:reduction
+        values = V4(
+            A[row, k],
+            A[row + 1, k],
+            A[row + 2, k],
+            A[row + 3, k],
+        )
+        offset = (k - 1) * width + local_column - 1
+        accumulators = ntuple(
+            column -> accumulators[column] +
+                      values * V4(packed_b[offset + column]),
+            Val(NR),
+        )
+    end
+
+    alpha_vector = V4(alpha)
+    beta_vector = V4(beta)
+    @inbounds for column in 1:NR
+        output_column = global_column + column - 1
+        result = alpha_vector * accumulators[column] + beta_vector * V4(
+            C[row, output_column],
+            C[row + 1, output_column],
+            C[row + 2, output_column],
+            C[row + 3, output_column],
+        )
+        for lane in 1:4
+            C[row + lane - 1, output_column] = result[lane]
+        end
+    end
+    return nothing
+end
+
+@inline function _packed_gemm_scalar_block!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    packed_b::AbstractVector{MF},
+    width::Int,
+    row::Int,
+    local_column::Int,
+    global_column::Int,
+    alpha::MF,
+    beta::MF,
+    ::Val{NR},
+) where {MF<:MultiFloat,NR}
+    accumulators = ntuple(_ -> zero(MF), Val(NR))
+    reduction = size(A, 2)
+    @inbounds for k in 1:reduction
+        value = A[row, k]
+        offset = (k - 1) * width + local_column - 1
+        accumulators = ntuple(
+            column -> accumulators[column] +
+                      value * packed_b[offset + column],
+            Val(NR),
+        )
+    end
+    @inbounds for column in 1:NR
+        output_column = global_column + column - 1
+        C[row, output_column] =
+            alpha * accumulators[column] + beta * C[row, output_column]
+    end
+    return nothing
+end
+
+function _packed_gemm_column_group!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    packed_b::AbstractVector{MF},
+    width::Int,
+    local_column::Int,
+    global_column::Int,
+    alpha::MF,
+    beta::MF,
+    columns::Val{NR},
+) where {MF<:MultiFloat,NR}
+    m = size(A, 1)
+    row = 1
+    @inbounds while row + 3 <= m
+        _packed_gemm_vector_block!(
+            C,
+            A,
+            packed_b,
+            width,
+            row,
+            local_column,
+            global_column,
+            alpha,
+            beta,
+            columns,
+        )
+        row += 4
+    end
+    while row <= m
+        _packed_gemm_scalar_block!(
+            C,
+            A,
+            packed_b,
+            width,
+            row,
+            local_column,
+            global_column,
+            alpha,
+            beta,
+            columns,
+        )
+        row += 1
+    end
+    return nothing
+end
+
+function _packed_gemm_panel_nr!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    packed_b::AbstractVector{MF},
+    first_column::Int,
+    width::Int,
+    alpha::MF,
+    beta::MF,
+    ::Val{NR},
+) where {MF<:MultiFloat,NR}
+    local_column = 1
+    while local_column + NR - 1 <= width
+        _packed_gemm_column_group!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+            alpha,
+            beta,
+            Val(NR),
+        )
+        local_column += NR
+    end
+    while local_column + 1 <= width
+        _packed_gemm_column_group!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+            alpha,
+            beta,
+            Val(2),
+        )
+        local_column += 2
+    end
+    if local_column <= width
+        _packed_gemm_column_group!(
+            C,
+            A,
+            packed_b,
+            width,
+            local_column,
+            first_column + local_column - 1,
+            alpha,
+            beta,
+            Val(1),
+        )
+    end
+    return C
+end
+
+function _packed_gemm_panel!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    packed_b::AbstractVector{MF},
+    first_column::Int,
+    width::Int,
+    alpha::MF,
+    beta::MF,
+    micro_columns::Int,
+) where {MF<:MultiFloat}
+    if micro_columns == 4
+        return _packed_gemm_panel_nr!(
+            C, A, packed_b, first_column, width, alpha, beta, Val(4),
+        )
+    elseif micro_columns == 2
+        return _packed_gemm_panel_nr!(
+            C, A, packed_b, first_column, width, alpha, beta, Val(2),
+        )
+    end
+    return _packed_gemm_panel_nr!(
+        C, A, packed_b, first_column, width, alpha, beta, Val(1),
+    )
+end
+
+function _gemm_packed_worker!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractMatrix{MF},
+    alpha::MF,
+    beta::MF,
+    plan::GemmPlan,
+    workspace::GemmWorkspace{MF},
+    worker::Int,
+    jobs::Int,
+) where {MF<:MultiFloat}
+    buffer = workspace.buffers[worker]
+    @inbounds for job in worker:plan.workers:jobs
+        first_column = (job - 1) * plan.panel_columns + 1
+        last_column = min(job * plan.panel_columns, size(B, 2))
+        width = _pack_b_panel!(buffer, B, first_column, last_column)
+        _packed_gemm_panel!(
+            C,
+            A,
+            buffer,
+            first_column,
+            width,
+            alpha,
+            beta,
+            plan.micro_columns,
+        )
+    end
+    return nothing
+end
+
+function _gemm_packed!(
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractMatrix{MF},
+    alpha::MF,
+    beta::MF,
+    plan::GemmPlan,
+    workspace::Union{Nothing,GemmWorkspace{MF}},
+) where {MF<:MultiFloat}
+    jobs = cld(size(B, 2), plan.panel_columns)
+    owned_workspace = workspace === nothing ?
+                      GemmWorkspace(
+                          MF;
+                          thread_count=plan.workers,
+                          capacity=plan.packed_elements_per_worker,
+                      ) :
+                      workspace
+    _prepare_gemm_workspace!(
+        owned_workspace,
+        plan.workers,
+        plan.packed_elements_per_worker,
+    )
+    if plan.workers == 1 || jobs <= 1
+        _gemm_packed_worker!(
+            C, A, B, alpha, beta, plan, owned_workspace, 1, jobs,
+        )
+        return C
+    end
+
+    @sync for worker in 1:plan.workers
+        Threads.@spawn _gemm_packed_worker!(
+            C,
+            A,
+            B,
+            alpha,
+            beta,
+            plan,
+            owned_workspace,
+            worker,
+            jobs,
+        )
+    end
+    return C
+end
+
+"""
+    gemm!(C, A, B, alpha=one(eltype(A)), beta=zero(eltype(A));
+          config=KernelConfig(), workspace=nothing)
+
+CPU matrix multiplication specialized for `MultiFloat{T,N}`. The direct route
+uses four SIMD row lanes and two output columns. The packed route stores each
+B panel in reduction-major order, then reuses every A lane load across a
+2- or 4-column register microkernel. Output-column panels have disjoint task
+ownership. Passing `GemmWorkspace` removes repeated packing-buffer allocation.
 """
 function gemm!(
     C::AbstractMatrix{MF},
@@ -126,6 +545,7 @@ function gemm!(
     alpha::MF=one(MF),
     beta::MF=zero(MF);
     config::KernelConfig=KernelConfig(),
+    workspace::Union{Nothing,GemmWorkspace{MF}}=nothing,
 ) where {MF<:MultiFloat}
     m, k = size(A)
     size(B, 1) == k || throw(DimensionMismatch("gemm! inner dimensions differ"))
@@ -133,24 +553,9 @@ function gemm!(
     size(C) == (m, n) || throw(DimensionMismatch("gemm! output dimensions differ"))
     _check_supported(MF)
 
-    tile = max(config.column_tile, 1)
-    jobs = cld(n, tile)
-    workers = _workers(config, jobs)
-    if workers == 1 || jobs == 1
-        _gemm_column_range!(C, A, B, alpha, beta, 1, n)
-        return C
+    plan = gemm_plan(MF, m, k, n, config)
+    if plan.strategy === :packed
+        return _gemm_packed!(C, A, B, alpha, beta, plan, workspace)
     end
-
-    @sync for worker in 1:workers
-        Threads.@spawn begin
-            for job in worker:workers:jobs
-                first_column = (job - 1) * tile + 1
-                last_column = min(job * tile, n)
-                _gemm_column_range!(
-                    C, A, B, alpha, beta, first_column, last_column,
-                )
-            end
-        end
-    end
-    return C
+    return _gemm_direct!(C, A, B, alpha, beta, plan)
 end

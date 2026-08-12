@@ -73,11 +73,65 @@ end
                 @test max_relative_error(output, reference) <= tolerance(T, n)
             end
 
-            @testset "gemm!" begin
+            @testset "direct and packed gemm!" begin
                 reference = A * B
-                output = zeros(T, n, n)
-                gemm!(output, A, B; config=config)
-                @test max_relative_error(output, reference) <= tolerance(T, n)
+                direct = zeros(T, n, n)
+                direct_config = KernelConfig(
+                    thread_count=2,
+                    gemm_strategy=:direct,
+                    gemm_panel_columns=5,
+                )
+                gemm!(direct, A, B; config=direct_config)
+                @test max_relative_error(direct, reference) <= tolerance(T, n)
+
+                packed = zeros(T, n, n)
+                packed_config = KernelConfig(
+                    thread_count=2,
+                    gemm_strategy=:packed,
+                    gemm_panel_columns=5,
+                    gemm_micro_columns=4,
+                )
+                workspace = GemmWorkspace(
+                    T;
+                    thread_count=2,
+                    capacity=n * 5,
+                )
+                gemm!(
+                    packed,
+                    A,
+                    B;
+                    config=packed_config,
+                    workspace=workspace,
+                )
+                @test packed == direct
+
+                direct_plan = gemm_plan(T, n, n, n, direct_config)
+                packed_plan = gemm_plan(T, n, n, n, packed_config)
+                @test direct_plan.strategy === :direct
+                @test packed_plan.strategy === :packed
+                @test packed_plan.panel_columns == 5
+                @test packed_plan.micro_columns == 4
+            end
+
+            @testset "GEMM calibration contract" begin
+                builtin = default_gemm_profile(T; thread_count=2)
+                resolved = with_gemm_profile(config, builtin)
+                plan = gemm_plan(T, 256, 256, 256, resolved)
+                @test plan.strategy in (:direct, :packed)
+                @test builtin.source === :builtin
+                @test builtin.fingerprint.julia_threads == 2
+
+                calibration = calibrate_gemm(
+                    T;
+                    sizes=(8,),
+                    samples=1,
+                    thread_count=1,
+                    candidates=((4, 2), (4, 4)),
+                )
+                @test calibration.profile.source === :calibrated
+                @test length(calibration.measurements) == 3
+                @test calibration.profile.panel_columns == 4
+                @test calibration.profile.micro_columns in (2, 4)
             end
 
             @testset "syrk!" begin
@@ -235,6 +289,76 @@ end
                 residual = original * solution - rhs_original
                 @test max_relative_error(residual, zeros(T, n)) <=
                     tolerance(T, 128n)
+            end
+
+            @testset "blocked LDLT with lazy panel updates" begin
+                nld = 24
+                R = randn(nld, nld)
+                S = 0.01 .* (R + transpose(R))
+                for i in 1:nld
+                    S[i, i] += isodd(i) ? nld : -nld
+                end
+                Aind = T.(Matrix(S))
+                original = copy(Aind)
+                blocked_config = KernelConfig(
+                    thread_count=2,
+                    ldlt_strategy=:blocked,
+                    ldlt_block=5,
+                    ldlt_blocked_crossover=1,
+                    gemm_strategy=:direct,
+                )
+                plan = ldlt_plan(T, nld, blocked_config)
+                @test plan.strategy === :blocked
+                @test plan.block_size == 5
+                F = MultiFloatLinearAlgebra.ldlt!(
+                    Aind;
+                    config=blocked_config,
+                )
+                @test MultiFloatLinearAlgebra.issuccess(F)
+                rhs = T.(randn(nld, 4))
+                rhs_original = copy(rhs)
+                solution = MultiFloatLinearAlgebra.solve(
+                    F, rhs; config=blocked_config,
+                )
+                residual = original * solution - rhs_original
+                @test max_relative_error(
+                    residual,
+                    zeros(T, size(residual)),
+                ) <= tolerance(T, 512nld)
+
+                crossing_n = 16
+                crossing = zeros(T, crossing_n, crossing_n)
+                for k in 1:2:crossing_n
+                    coupling = T(1 + k / 20)
+                    crossing[k, k + 1] = coupling
+                    crossing[k + 1, k] = coupling
+                end
+                crossing_original = copy(crossing)
+                crossing_config = KernelConfig(
+                    thread_count=2,
+                    ldlt_strategy=:blocked,
+                    ldlt_block=3,
+                    ldlt_blocked_crossover=1,
+                    gemm_strategy=:direct,
+                )
+                crossing_factor = MultiFloatLinearAlgebra.ldlt!(
+                    crossing;
+                    config=crossing_config,
+                )
+                @test MultiFloatLinearAlgebra.issuccess(crossing_factor)
+                @test count(==(UInt8(2)), crossing_factor.blocks) == crossing_n ÷ 2
+                crossing_rhs = T.(randn(crossing_n))
+                crossing_solution = MultiFloatLinearAlgebra.solve(
+                    crossing_factor,
+                    crossing_rhs;
+                    config=crossing_config,
+                )
+                crossing_residual =
+                    crossing_original * crossing_solution - crossing_rhs
+                @test max_relative_error(
+                    crossing_residual,
+                    zeros(T, crossing_n),
+                ) <= tolerance(T, 256crossing_n)
             end
         end
     end

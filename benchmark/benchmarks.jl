@@ -61,8 +61,9 @@ function benchmark_gemm(::Type{T}, n, config) where {T}
 
     tg = median_seconds(generic)
     tb = median_seconds(backend)
+    plan = gemm_plan(T, n, n, n, config)
     report_row("GEMM", string(T), "LinearAlgebra", n, tg)
-    report_row("GEMM", string(T), "MFLA", n, tb, tg)
+    report_row("GEMM", string(T), "MFLA/$(plan.strategy)", n, tb, tg)
 end
 
 function benchmark_trsm(::Type{T}, n, config) where {T}
@@ -122,17 +123,41 @@ function benchmark_lu(::Type{T}, n, config) where {T}
     report_row("LU", string(T), "MFLA", n, tb, tg)
 end
 
-function benchmark_ldlt(::Type{T}, n) where {T}
+function benchmark_ldlt(::Type{T}, n, config) where {T}
     R = randn(n, n)
     A64 = 0.02 .* (R + transpose(R))
     @inbounds for i in 1:n
         A64[i, i] += isodd(i) ? n : -n
     end
     A = T.(Matrix(A64))
-    trial = @benchmark MultiFloatLinearAlgebra.ldlt!(
-        X; check=false,
+    unblocked_config = KernelConfig(
+        thread_count=config.thread_count,
+        ldlt_strategy=:unblocked,
+        gemm_strategy=config.gemm_strategy,
+        gemm_packed_crossover=config.gemm_packed_crossover,
+        gemm_panel_columns=config.gemm_panel_columns,
+        gemm_micro_columns=config.gemm_micro_columns,
+    )
+    blocked_config = KernelConfig(
+        thread_count=config.thread_count,
+        ldlt_strategy=:blocked,
+        ldlt_block=0,
+        ldlt_blocked_crossover=1,
+        gemm_strategy=config.gemm_strategy,
+        gemm_packed_crossover=config.gemm_packed_crossover,
+        gemm_panel_columns=config.gemm_panel_columns,
+        gemm_micro_columns=config.gemm_micro_columns,
+    )
+    unblocked = @benchmark MultiFloatLinearAlgebra.ldlt!(
+        X; check=false, config=$unblocked_config,
     ) setup=(X=copy($A)) samples=5 evals=1
-    report_row("LDLT", string(T), "MFLA", n, median_seconds(trial))
+    blocked = @benchmark MultiFloatLinearAlgebra.ldlt!(
+        X; check=false, config=$blocked_config,
+    ) setup=(X=copy($A)) samples=5 evals=1
+    tu = median_seconds(unblocked)
+    tb = median_seconds(blocked)
+    report_row("LDLT", string(T), "MFLA/unblocked", n, tu)
+    report_row("LDLT", string(T), "MFLA/blocked", n, tb, tu)
 end
 
 function benchmark_float64(n)
@@ -158,23 +183,34 @@ end
 function main()
     n = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 96
     threads = Threads.nthreads()
-    config = KernelConfig(thread_count=threads)
+    config = with_gemm_profile(
+        KernelConfig(thread_count=threads),
+        default_gemm_profile(Float64x4; thread_count=threads),
+    )
     println("MultiFloatLinearAlgebra benchmark")
     println("Julia threads: $threads; BLAS threads: 1; matrix size: $n")
     println()
 
     benchmark_float64(n)
     for T in TYPES
-        benchmark_gemm(T, n, config)
+        type_config = with_gemm_profile(
+            config,
+            default_gemm_profile(T; thread_count=threads),
+        )
+        benchmark_gemm(T, n, type_config)
     end
     println()
 
     factor_n = min(n, 256)
     for T in TYPES
-        benchmark_trsm(T, factor_n, config)
-        benchmark_cholesky(T, factor_n, config)
-        benchmark_lu(T, factor_n, config)
-        benchmark_ldlt(T, min(factor_n, 128))
+        type_config = with_gemm_profile(
+            config,
+            default_gemm_profile(T; thread_count=threads),
+        )
+        benchmark_trsm(T, factor_n, type_config)
+        benchmark_cholesky(T, factor_n, type_config)
+        benchmark_lu(T, factor_n, type_config)
+        benchmark_ldlt(T, min(factor_n, 256), type_config)
     end
 
     if "--bigfloat" in ARGS
