@@ -2,15 +2,9 @@ name: X3 Micro3 GEMM Experiment
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["agent/bootstrap-linear-algebra"]
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
-  cancel-in-progress: false
 
 jobs:
   x3-micro3:
