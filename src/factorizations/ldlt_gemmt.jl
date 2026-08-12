@@ -6,7 +6,6 @@ function _ldlt_block_trailing_update!(
     dsub::Vector{MF},
     blocks::Vector{UInt8},
     config::KernelConfig,
-    gemm_workspace::GemmWorkspace{MF},
 ) where {MF<:MultiFloat}
     n = size(A, 1)
     panel_last < n || return nothing
@@ -32,4 +31,43 @@ function _ldlt_block_trailing_update!(
     # read-only upper mirror without repeating the matrix product.
     _mirror_lower_to_upper!(A22)
     return nothing
+end
+
+function _factor_ldlt_blocked!(
+    A::StridedMatrix{MF},
+    dsub::Vector{MF},
+    pivots::Vector{Int},
+    blocks::Vector{UInt8},
+    alpha::MF,
+    plan::LDLTPlan,
+    config::KernelConfig,
+) where {MF<:MultiFloat}
+    n = size(A, 1)
+    weighted_storage = Matrix{MF}(undef, n, plan.block_size + 1)
+
+    panel_first = 1
+    while panel_first <= n
+        requested_last = min(panel_first + plan.block_size - 1, n)
+        info, panel_last = _factor_ldlt_panel!(
+            A,
+            panel_first,
+            requested_last,
+            dsub,
+            pivots,
+            blocks,
+            alpha,
+        )
+        !iszero(info) && return info
+        _ldlt_block_trailing_update!(
+            A,
+            panel_first,
+            panel_last,
+            weighted_storage,
+            dsub,
+            blocks,
+            config,
+        )
+        panel_first = panel_last + 1
+    end
+    return 0
 end
