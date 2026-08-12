@@ -1,0 +1,33 @@
+name: Raw MultiFloat Arithmetic Profile
+
+on:
+  pull_request:
+    paths:
+      - "benchmark/arithmetic_profile.jl"
+      - ".github/workflows/arithmetic-profile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arithmetic-profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate benchmark environment
+        run: julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+      - name: Profile scalar and SIMD MultiFloat arithmetic
+        env:
+          MFLA_PROFILE_OUT: arithmetic-codegen
+        run: julia -t 1 --project=benchmark benchmark/arithmetic_profile.jl 4096 16 5 | tee arithmetic-profile.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arithmetic-profile
+          path: |
+            arithmetic-profile.txt
+            arithmetic-codegen/
