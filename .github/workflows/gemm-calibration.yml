@@ -1,0 +1,44 @@
+name: GEMM Machine Calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_size:
+        description: First square calibration size
+        required: true
+        default: "512"
+      second_size:
+        description: Second square calibration size
+        required: true
+        default: "1024"
+      samples:
+        description: Median sample count
+        required: true
+        default: "3"
+      minimum_speedup:
+        description: Required packed/direct speedup
+        required: true
+        default: "1.05"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate benchmark environment
+        run: julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+      - name: Calibrate x2/x3/x4 GEMM
+        run: >-
+          julia -t 4 --project=benchmark benchmark/calibrate_gemm.jl
+          ${{ inputs.first_size }}
+          ${{ inputs.second_size }}
+          ${{ inputs.samples }}
+          ${{ inputs.minimum_speedup }}
