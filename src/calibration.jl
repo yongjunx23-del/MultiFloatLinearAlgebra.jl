@@ -116,18 +116,21 @@ function _calibration_seconds(
 end
 
 """
-    calibrate_gemm(T; sizes=(256, 512), samples=3,
+    calibrate_gemm(T; sizes=(512, 1024), samples=3,
                    thread_count=Threads.nthreads(), candidates=nothing,
                    minimum_speedup=1.05)
 
 Benchmark the direct route and a deterministic packed-panel candidate set. The
 function returns every measurement plus a `GemmProfile`; it never installs
-global state.
+global state. Calibration is intentionally explicit and moderately expensive:
+the defaults target the 512/1024 dense regime where panel packing can change
+the memory-traffic balance. Callers working at other scales should pass their
+own representative `sizes`.
 
 The candidate is chosen by performance at the largest tested size. Packed mode
 is accepted only when that largest point beats direct by `minimum_speedup`, and
 the crossover is the earliest tested size from which every larger tested point
-also clears the same margin. This suffix rule prevents a noisy small matrix
+also clears the same margin. This suffix rule prevents a noisy smaller matrix
 from enabling a route that regresses at the intended production scale.
 
 The direct and packed outputs must also be exactly equal under the package's
@@ -136,7 +139,7 @@ gates, the returned profile explicitly selects `:direct`.
 """
 function calibrate_gemm(
     ::Type{MF};
-    sizes=(256, 512),
+    sizes=(512, 1024),
     samples::Int=3,
     thread_count::Int=Threads.nthreads(),
     candidates=nothing,
