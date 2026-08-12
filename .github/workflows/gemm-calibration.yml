@@ -19,6 +19,11 @@ on:
         description: Required packed/direct speedup
         required: true
         default: "1.05"
+  push:
+    branches:
+      - agent/bootstrap-linear-algebra
+    paths:
+      - .github/workflows/gemm-calibration.yml
 
 permissions:
   actions: write
@@ -36,9 +41,14 @@ jobs:
       - name: Instantiate benchmark environment
         run: julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
       - name: Calibrate x2/x3/x4 GEMM
+        env:
+          FIRST_SIZE: ${{ inputs.first_size || '512' }}
+          SECOND_SIZE: ${{ inputs.second_size || '1024' }}
+          SAMPLES: ${{ inputs.samples || '3' }}
+          MINIMUM_SPEEDUP: ${{ inputs.minimum_speedup || '1.05' }}
         run: >-
           julia -t 4 --project=benchmark benchmark/calibrate_gemm.jl
-          ${{ inputs.first_size }}
-          ${{ inputs.second_size }}
-          ${{ inputs.samples }}
-          ${{ inputs.minimum_speedup }}
+          "$FIRST_SIZE"
+          "$SECOND_SIZE"
+          "$SAMPLES"
+          "$MINIMUM_SPEEDUP"
