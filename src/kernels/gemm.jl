@@ -669,10 +669,15 @@ B panel in reduction-major order, then reuses every A lane load across a
 2- or 4-column register microkernel. The fused Float64x3 route uses the same
 four-lane direct layout but replaces `acc += x*y` with the `mulacc_x3` fused
 multiply-accumulate network. Output-column panels have disjoint task ownership.
-Passing `GemmWorkspace` removes repeated packing-buffer allocation.
+Passing `GemmWorkspace` or `MFWorkspace` removes repeated packing-buffer
+allocation.
 
 The kernel requires one-based indexing and does not support aliasing: `C` must
 not share storage with `A` or `B`.
+
+The reduction reads `C` in the `beta` update; when `beta == 0` the caller is
+still responsible for supplying an initialized `C`, matching the package's
+deterministic reference semantics.
 """
 function gemm!(
     C::AbstractMatrix{MF},
@@ -681,7 +686,7 @@ function gemm!(
     alpha::MF=one(MF),
     beta::MF=zero(MF);
     config::KernelConfig=KernelConfig(),
-    workspace::Union{Nothing,GemmWorkspace{MF}}=nothing,
+    workspace::Union{Nothing,GemmWorkspace{MF},MFWorkspace{MF}}=nothing,
 ) where {MF<:MultiFloat}
     m, k = size(A)
     size(B, 1) == k || throw(DimensionMismatch("gemm! inner dimensions differ"))
@@ -689,10 +694,14 @@ function gemm!(
     size(C) == (m, n) || throw(DimensionMismatch("gemm! output dimensions differ"))
     _check_supported(MF)
     Base.require_one_based_indexing(C, A, B)
+    _require_no_output_alias("gemm!", C, A)
+    _require_no_output_alias("gemm!", C, B)
 
     plan = gemm_plan(MF, m, k, n, config)
     if plan.strategy === :packed
-        return _gemm_packed!(C, A, B, alpha, beta, plan, workspace)
+        packed_workspace = workspace === nothing ? nothing :
+                           _gemm_workspace(workspace)
+        return _gemm_packed!(C, A, B, alpha, beta, plan, packed_workspace)
     elseif plan.strategy === :fused
         return _gemm_direct_fused!(C, A, B, alpha, beta, plan)
     end

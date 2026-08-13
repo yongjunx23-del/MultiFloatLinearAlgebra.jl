@@ -20,9 +20,13 @@ function _gemv_rows!(
             )
             accumulator += values * V4(x[column])
         end
-        result = V4(alpha) * accumulator + V4(beta) * V4(
-            y[row], y[row + 1], y[row + 2], y[row + 3],
-        )
+        result = if beta == zero(MF)
+            V4(alpha) * accumulator
+        else
+            V4(alpha) * accumulator + V4(beta) * V4(
+                y[row], y[row + 1], y[row + 2], y[row + 3],
+            )
+        end
         for lane in 1:4
             y[row + lane - 1] = result[lane]
         end
@@ -34,7 +38,9 @@ function _gemv_rows!(
         for column in axes(A, 2)
             accumulator += A[scalar_row, column] * x[column]
         end
-        y[scalar_row] = alpha * accumulator + beta * y[scalar_row]
+        y[scalar_row] = beta == zero(MF) ?
+            alpha * accumulator :
+            alpha * accumulator + beta * y[scalar_row]
     end
     return nothing
 end
@@ -97,6 +103,10 @@ With `trans=:T`, compute `y = alpha*transpose(A)*x + beta*y` without forming a
 transposed matrix. The transpose kernel maps four output columns into SIMD
 lanes while traversing rows in ascending order, preserving the deterministic
 reduction order.
+
+When `beta == 0`, `y` is not read, so an uninitialized or stale `y` is safe;
+this is consistent between `trans=:N` and `trans=:T`. `y` must not alias `A`
+or `x`.
 """
 function gemv!(
     y::AbstractVector{MF},
@@ -111,6 +121,8 @@ function gemv!(
     trans in (:N, :T) || throw(ArgumentError("trans must be :N or :T"))
     _check_supported(MF)
     Base.require_one_based_indexing(y, A, x)
+    _require_no_output_alias("gemv!", y, A)
+    _require_no_output_alias("gemv!", y, x)
 
     if trans === :N
         length(x) == n || throw(DimensionMismatch("gemv! input length differs"))

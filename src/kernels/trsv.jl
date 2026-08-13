@@ -14,6 +14,7 @@ This is the single-column counterpart of [`trsm!`](@ref) and follows the same
 numerical ordering: forward substitution for the effective lower triangle and
 backward substitution for the effective upper triangle. The triangular
 dependency is inherently serial, so there is no parallel path.
+`x` must not alias `A`.
 """
 function trsv!(
     x::AbstractVector{MF},
@@ -33,6 +34,7 @@ function trsv!(
     diag in (:unit, :nonunit) || throw(ArgumentError("diag must be :unit or :nonunit"))
     _check_supported(MF)
     Base.require_one_based_indexing(x, A)
+    _require_no_output_alias("trsv!", x, A)
 
     if alpha != one(MF)
         @inbounds for index in eachindex(x)

@@ -1,12 +1,34 @@
-struct MFLU{MF<:MultiFloat,M<:AbstractMatrix{MF}} <: AbstractMFFactorization{MF}
+struct MFLU{
+    MF<:MultiFloat,
+    M<:AbstractMatrix{MF},
+    P<:AbstractVector{Int},
+} <: AbstractMFFactorization{MF}
     factors::M
-    ipiv::Vector{Int}
+    ipiv::P
     info::Int
+    original_maximum::MF
+    lease::Union{Nothing,_FactorWorkspaceLease{MF}}
 end
 
 factor_kind(::MFLU) = :lu
-factor_status(F::MFLU) = F.info
-factor_matrix(F::MFLU) = F.factors
+@inline _check_factor_valid(F::MFLU) = _check_factor_lease(F.lease)
+factor_status(F::MFLU) = (_check_factor_lease(F.lease); F.info)
+factor_matrix(F::MFLU) = (_check_factor_lease(F.lease); F.factors)
+
+function _prepare_lu_metadata!(
+    ::Type{MF},
+    count::Int,
+    workspace::Union{Nothing,MFWorkspace{MF}},
+) where {MF<:MultiFloat}
+    if workspace === nothing
+        return collect(1:count), nothing
+    end
+    lease = _acquire_factor_workspace!(workspace, count)
+    @inbounds for index in 1:count
+        workspace.lu_pivots[index] = index
+    end
+    return @view(workspace.lu_pivots[1:count]), lease
+end
 
 @inline function _swap_rows!(
     A::AbstractMatrix,
@@ -62,7 +84,7 @@ function _factor_lu_panel!(
     A::AbstractMatrix{MF},
     first::Int,
     last::Int,
-    ipiv::Vector{Int},
+    ipiv::AbstractVector{Int},
 ) where {MF<:MultiFloat}
     m = size(A, 1)
     @inbounds for k in first:last
@@ -89,7 +111,7 @@ function _factor_lu_panel!(
 end
 
 """
-    lu!(A; check=true, config=KernelConfig())
+    lu!(A; check=true, config=KernelConfig(), workspace=nothing)
 
 Blocked dense partial-pivoting LU specialized for MultiFloat matrices. The
 panel factorization performs pivoting and only updates the current panel.
@@ -98,12 +120,15 @@ kernel and the O(n^3) trailing update is delegated to the SIMD/threaded
 `gemm!` backend.
 
 The factorization stores unit-lower `L` below the diagonal and `U` on/above
-the diagonal. `ipiv` records the row swap performed at each pivot.
+the diagonal. `ipiv` records the row swap performed at each pivot. With
+`workspace=MFWorkspace(T)`, the returned factor borrows pivot metadata until
+the workspace starts another factorization.
 """
 function lu!(
     A::AbstractMatrix{MF};
     check::Bool=true,
     config::KernelConfig=KernelConfig(),
+    workspace::Union{Nothing,MFWorkspace{MF}}=nothing,
 ) where {MF<:MultiFloat}
     m, n = size(A)
     _check_supported(MF)
@@ -111,9 +136,13 @@ function lu!(
     kmax = min(m, n)
     if !_all_finite(A)
         check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))
-        return MFLU{MF,typeof(A)}(A, collect(1:kmax), -1)
+        ipiv, lease = _prepare_lu_metadata!(MF, kmax, workspace)
+        return MFLU{MF,typeof(A),typeof(ipiv)}(
+            A, ipiv, -1, zero(MF), lease,
+        )
     end
-    ipiv = Vector{Int}(undef, kmax)
+    original_maximum = _maximum_abs(A)
+    ipiv, lease = _prepare_lu_metadata!(MF, kmax, workspace)
     info = 0
     block = max(config.lu_block, 1)
 
@@ -122,7 +151,9 @@ function lu!(
         info = _factor_lu_panel!(A, first, last, ipiv)
         if !iszero(info)
             check && throw(LinearAlgebra.SingularException(info))
-            return MFLU{MF,typeof(A)}(A, ipiv, info)
+            return MFLU{MF,typeof(A),typeof(ipiv)}(
+                A, ipiv, info, original_maximum, lease,
+            )
         end
 
         if last < n
@@ -148,10 +179,13 @@ function lu!(
                     -one(MF),
                     one(MF);
                     config=config,
+                    workspace=workspace,
                 )
             end
         end
     end
 
-    return MFLU{MF,typeof(A)}(A, ipiv, 0)
+    return MFLU{MF,typeof(A),typeof(ipiv)}(
+        A, ipiv, 0, original_maximum, lease,
+    )
 end

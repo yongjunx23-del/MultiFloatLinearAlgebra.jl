@@ -3,8 +3,8 @@ function _ldlt_block_trailing_update!(
     panel_first::Int,
     panel_last::Int,
     weighted_storage::Matrix{MF},
-    dsub::Vector{MF},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    blocks::AbstractVector{UInt8},
     config::KernelConfig,
 ) where {MF<:MultiFloat}
     n = size(A, 1)
@@ -35,15 +35,15 @@ end
 
 function _factor_ldlt_blocked!(
     A::AbstractMatrix{MF},
-    dsub::Vector{MF},
-    pivots::Vector{Int},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    pivots::AbstractVector{Int},
+    blocks::AbstractVector{UInt8},
+    weighted_storage::Matrix{MF},
     alpha::MF,
     plan::LDLTPlan,
     config::KernelConfig,
 ) where {MF<:MultiFloat}
     n = size(A, 1)
-    weighted_storage = Matrix{MF}(undef, n, plan.block_size + 1)
 
     panel_first = 1
     while panel_first <= n

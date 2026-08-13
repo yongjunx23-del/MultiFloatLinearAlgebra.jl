@@ -219,7 +219,7 @@ Solve the BLAS-like triangular system
 in place, where `op(A)` is `A` or `transpose(A)`. The implementation is
 specialized for MultiFloat matrices, maps four independent right-hand sides
 (or rows for a right-side solve) into `MultiFloatVec` lanes, and lets threads
-own disjoint RHS tiles.
+own disjoint RHS tiles. `B` must not alias `A`.
 """
 function trsm!(
     B::AbstractMatrix{MF},
@@ -242,6 +242,7 @@ function trsm!(
         (size(B, 2) == n || throw(DimensionMismatch("trsm! right dimensions differ")))
     _check_supported(MF)
     Base.require_one_based_indexing(B, A)
+    _require_no_output_alias("trsm!", B, A)
 
     _trsm_scale!(B, alpha)
     transposed = trans === :T

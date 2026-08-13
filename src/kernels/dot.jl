@@ -1,18 +1,21 @@
 """
     mfdot(x, y)
 
-MultiFloat dot product with a deterministic ascending reduction order.
-This is the scalar reference primitive used by the higher-level backend.
+MultiFloat vector or Frobenius inner product with a deterministic ascending
+column-major reduction order. Inputs must have identical shapes and one-based
+indexing. No conjugation is applied because the supported MultiFloat element
+types are real.
 """
 function mfdot(
-    x::AbstractVector{MF},
-    y::AbstractVector{MF},
+    x::AbstractArray{MF},
+    y::AbstractArray{MF},
 ) where {MF<:MultiFloat}
-    length(x) == length(y) ||
-        throw(DimensionMismatch("dot product lengths differ"))
+    size(x) == size(y) ||
+        throw(DimensionMismatch("dot product shapes differ"))
     _check_supported(MF)
+    Base.require_one_based_indexing(x, y)
     accumulator = zero(MF)
-    @inbounds for i in eachindex(x, y)
+    @inbounds for i in 1:length(x)
         accumulator += x[i] * y[i]
     end
     return accumulator

@@ -13,7 +13,9 @@
 # a 512-bit BigFloat differential shows no degradation (error ratio 1.000).
 # This is a deterministic optimization, not a universal identity: a formal
 # proof of bitwise equivalence across the EFT network would be required before
-# claiming mathematical identity.
+# claiming mathematical identity. The exact soft proof boundary, fixed limb
+# vectors, and assumptions are recorded in
+# `docs/MULACC_X3_PROOF_CONTRACT.md`.
 
 @inline function _product_prefix_x3(x::MultiFloatVec{4,Float64,3}, y::MultiFloatVec{4,Float64,3})
     x0, x1, x2 = x._limbs
@@ -86,10 +88,12 @@ end
 end
 
 # Structured-update arithmetic (GEMMT/SYRK). The fused x3 network regressed on
-# x86_64 for these kernels, so it is fused only on AArch64 where the measured
-# evidence is positive. This is a compile-time gate: it introduces no hot-loop
-# branch and is easy to replace later with explicit machine calibration.
-_structured_fuses_x3() = Sys.ARCH === :aarch64
+# x86_64, and positive AArch64 evidence comes specifically from Apple M4, so
+# the built-in fused structured route is conservatively restricted to
+# Darwin + AArch64. Other AArch64 CPUs (Graviton/Ampere/etc.) are not assumed
+# to behave the same. This is a compile-time gate: it introduces no hot-loop
+# branch and can later be replaced by explicit structured calibration.
+_structured_fuses_x3() = Sys.isapple() && Sys.ARCH === :aarch64
 
 @inline function _structured_mulacc(
     acc::MultiFloatVec{4,T,N},
@@ -104,7 +108,7 @@ end
     x::MultiFloatVec{4,Float64,3},
     y::MultiFloatVec{4,Float64,3},
 )
-    @static if Sys.ARCH === :aarch64
+    @static if Sys.isapple() && Sys.ARCH === :aarch64
         return mulacc_x3(acc, x, y)
     else
         return acc + x * y

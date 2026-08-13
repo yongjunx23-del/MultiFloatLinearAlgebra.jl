@@ -1,14 +1,58 @@
-struct MFLDLT{MF<:MultiFloat,M<:AbstractMatrix{MF}} <: AbstractMFFactorization{MF}
+struct MFLDLT{
+    MF<:MultiFloat,
+    M<:AbstractMatrix{MF},
+    D<:AbstractVector{MF},
+    P<:AbstractVector{Int},
+    B<:AbstractVector{UInt8},
+} <: AbstractMFFactorization{MF}
     factors::M
-    dsub::Vector{MF}
-    pivots::Vector{Int}
-    blocks::Vector{UInt8}
+    dsub::D
+    pivots::P
+    blocks::B
     info::Int
+    original_maximum::MF
+    lease::Union{Nothing,_FactorWorkspaceLease{MF}}
 end
 
 factor_kind(::MFLDLT) = :ldlt
-factor_status(F::MFLDLT) = F.info
-factor_matrix(F::MFLDLT) = F.factors
+@inline _check_factor_valid(F::MFLDLT) = _check_factor_lease(F.lease)
+factor_status(F::MFLDLT) = (_check_factor_lease(F.lease); F.info)
+factor_matrix(F::MFLDLT) = (_check_factor_lease(F.lease); F.factors)
+
+function _prepare_ldlt_metadata!(
+    ::Type{MF},
+    count::Int,
+    block_capacity::Int,
+    workspace::Union{Nothing,MFWorkspace{MF}},
+) where {MF<:MultiFloat}
+    if workspace === nothing
+        return (
+            zeros(MF, count),
+            collect(1:count),
+            zeros(UInt8, count),
+            block_capacity > 0 ?
+                Matrix{MF}(undef, count, block_capacity + 1) : nothing,
+            nothing,
+        )
+    end
+
+    lease = _acquire_factor_workspace!(workspace, count, block_capacity)
+    dsub = @view workspace.ldlt_dsub[1:count]
+    pivots = @view workspace.ldlt_pivots[1:count]
+    blocks = @view workspace.ldlt_blocks[1:count]
+    fill!(dsub, zero(MF))
+    fill!(blocks, UInt8(0))
+    @inbounds for index in 1:count
+        pivots[index] = index
+    end
+    return (
+        dsub,
+        pivots,
+        blocks,
+        workspace.ldlt_weighted,
+        lease,
+    )
+end
 
 function _mirror_lower_to_upper!(A::AbstractMatrix)
     rows = axes(A, 1)
@@ -223,9 +267,9 @@ end
 
 function _factor_ldlt_unblocked!(
     A::AbstractMatrix{MF},
-    dsub::Vector{MF},
-    pivots::Vector{Int},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    pivots::AbstractVector{Int},
+    blocks::AbstractVector{UInt8},
     alpha::MF,
 ) where {MF<:MultiFloat}
     n = size(A, 1)
@@ -284,8 +328,8 @@ end
     second_index::Int,
     panel_first::Int,
     pivot_first::Int,
-    dsub::Vector{MF},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    blocks::AbstractVector{UInt8},
 ) where {MF<:MultiFloat}
     row = max(first_index, second_index)
     column = min(first_index, second_index)
@@ -319,8 +363,8 @@ function _select_bk_panel_pivot(
     A::AbstractMatrix{MF},
     k::Int,
     panel_first::Int,
-    dsub::Vector{MF},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    blocks::AbstractVector{UInt8},
     alpha::MF,
 ) where {MF<:MultiFloat}
     n = size(A, 1)
@@ -378,9 +422,9 @@ function _factor_ldlt_panel!(
     A::AbstractMatrix{MF},
     panel_first::Int,
     requested_last::Int,
-    dsub::Vector{MF},
-    pivots::Vector{Int},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    pivots::AbstractVector{Int},
+    blocks::AbstractVector{UInt8},
     alpha::MF,
 ) where {MF<:MultiFloat}
     n = size(A, 1)
@@ -459,8 +503,8 @@ function _build_ldlt_weighted_panel!(
     A::AbstractMatrix{MF},
     panel_first::Int,
     panel_last::Int,
-    dsub::Vector{MF},
-    blocks::Vector{UInt8},
+    dsub::AbstractVector{MF},
+    blocks::AbstractVector{UInt8},
 ) where {MF<:MultiFloat}
     trailing_first = panel_last + 1
     trailing_count = size(A, 1) - panel_last
@@ -494,7 +538,7 @@ function _build_ldlt_weighted_panel!(
 end
 
 """
-    ldlt!(A; check=true, config=KernelConfig())
+    ldlt!(A; check=true, config=KernelConfig(), workspace=nothing)
 
 Symmetric-indefinite `L*D*L'` factorization for dense MultiFloat matrices.
 The lower triangle of `A` is authoritative on input. Pivot selection follows
@@ -508,11 +552,16 @@ not weaken the pivot search or silently fall back to a no-pivot factorization.
 On return, the strict lower triangle stores unit-lower `L`, the diagonal stores
 the diagonal of `D`, and `F.dsub[k]` stores the off-diagonal of a 2x2 `D`
 block starting at `k`.
+
+With `workspace=MFWorkspace(T)`, metadata and the blocked weighted panel are
+borrowed from caller-owned storage until that workspace starts another
+factorization.
 """
 function ldlt!(
     A::AbstractMatrix{MF};
     check::Bool=true,
     config::KernelConfig=KernelConfig(),
+    workspace::Union{Nothing,MFWorkspace{MF}}=nothing,
 ) where {MF<:MultiFloat}
     n, m = size(A)
     n == m || throw(DimensionMismatch("ldlt! requires a square matrix"))
@@ -521,17 +570,40 @@ function ldlt!(
     _mirror_lower_to_upper!(A)
     if !_lower_triangle_finite(A)
         check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))
-        return MFLDLT{MF,typeof(A)}(A, zeros(MF, n), collect(1:n), zeros(UInt8, n), -1)
+        dsub, pivots, blocks, _, lease = _prepare_ldlt_metadata!(
+            MF, n, 0, workspace,
+        )
+        return MFLDLT{
+            MF,typeof(A),typeof(dsub),typeof(pivots),typeof(blocks),
+        }(
+            A,
+            dsub,
+            pivots,
+            blocks,
+            -1,
+            zero(MF),
+            lease,
+        )
     end
 
-    dsub = zeros(MF, n)
-    pivots = collect(1:n)
-    blocks = zeros(UInt8, n)
-    alpha = (one(MF) + sqrt(MF(17))) / MF(8)
+    original_maximum = _lower_maximum_abs(A)
     plan = ldlt_plan(MF, n, config)
+    block_capacity = plan.strategy === :blocked ? plan.block_size : 0
+
+    dsub, pivots, blocks, weighted_storage, lease = _prepare_ldlt_metadata!(
+        MF, n, block_capacity, workspace,
+    )
+    alpha = (one(MF) + sqrt(MF(17))) / MF(8)
     info = if plan.strategy === :blocked
         _factor_ldlt_blocked!(
-            A, dsub, pivots, blocks, alpha, plan, config,
+            A,
+            dsub,
+            pivots,
+            blocks,
+            weighted_storage::Matrix{MF},
+            alpha,
+            plan,
+            config,
         )
     else
         _factor_ldlt_unblocked!(A, dsub, pivots, blocks, alpha)
@@ -540,5 +612,9 @@ function ldlt!(
     if !iszero(info) && check
         throw(LinearAlgebra.SingularException(info))
     end
-    return MFLDLT{MF,typeof(A)}(A, dsub, pivots, blocks, info)
+    return MFLDLT{
+        MF,typeof(A),typeof(dsub),typeof(pivots),typeof(blocks),
+    }(
+        A, dsub, pivots, blocks, info, original_maximum, lease,
+    )
 end

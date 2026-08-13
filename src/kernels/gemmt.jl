@@ -57,7 +57,8 @@ Update only the lower triangle of
 This is the triangular-output GEMM primitive used by blocked LDLT. Callers are
 responsible for ensuring that the mathematical update is symmetric when only
 one triangle is retained. Each task owns complete output columns, and each
-SIMD lane preserves the ascending reduction order.
+SIMD lane preserves the ascending reduction order. `C` must not alias either
+input matrix.
 """
 function gemmt!(
     output::AbstractMatrix{MF},
@@ -74,6 +75,8 @@ function gemmt!(
         throw(DimensionMismatch("gemmt! output dimensions differ"))
     _check_supported(MF)
     Base.require_one_based_indexing(output, left, right)
+    _require_no_output_alias("gemmt!", output, left)
+    _require_no_output_alias("gemmt!", output, right)
 
     workers = _workers(config, rows)
     if workers == 1 || rows < 24

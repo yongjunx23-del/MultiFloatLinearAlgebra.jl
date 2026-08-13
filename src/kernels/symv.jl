@@ -28,7 +28,9 @@ function _symv_rows!(
                 accumulator += A[column, row] * x[column]
             end
         end
-        y[row] = alpha * accumulator + beta * y[row]
+        y[row] = beta == zero(MF) ?
+            alpha * accumulator :
+            alpha * accumulator + beta * y[row]
     end
     return nothing
 end
@@ -44,6 +46,9 @@ Only `uplo` is authoritative: with `uplo=:lower` the upper triangle is never
 read (and may contain `NaN`, `Inf`, or stale values), and with `uplo=:upper`
 the lower triangle is never read. Each output row is owned by one task, and
 each row performs an ascending-column reduction, so the result is deterministic.
+
+When `beta == 0`, `y` is not read, so an uninitialized or stale `y` is safe.
+`y` must not alias `A` or `x`.
 """
 function symv!(
     y::AbstractVector{MF},
@@ -61,6 +66,8 @@ function symv!(
     uplo in (:lower, :upper) || throw(ArgumentError("uplo must be :lower or :upper"))
     _check_supported(MF)
     Base.require_one_based_indexing(y, A, x)
+    _require_no_output_alias("symv!", y, A)
+    _require_no_output_alias("symv!", y, x)
 
     upper = uplo === :upper
     workers = _workers(config, cld(n, 32))

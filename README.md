@@ -11,10 +11,10 @@ in their own layers.
 
 ## Implemented backend
 
-- deterministic `mfdot`;
+- deterministic vector/Frobenius `mfdot`;
 - SIMD/threaded `gemv!` with transpose (`trans=:T`) support;
 - direct and B-panel-packed `gemm!`;
-- lower-triangular `syrk!` and `gemmt!`;
+- lower-triangular `syrk!`/`gemmt!` and packed-lower `syrk_packed!`;
 - BLAS-like left/right `trsm!`;
 - single-RHS vector `trsv!`;
 - authoritative-triangle `symv!`;
@@ -22,6 +22,12 @@ in their own layers.
 - blocked partial-pivoting LU using TRSM/GEMM;
 - Bunch--Kaufman-style symmetric-indefinite LDLT with 1x1/2x2 pivots;
 - vector and multi-RHS solves for Cholesky, LU, and LDLT;
+- deterministic column-pivoted Householder RRQR with caller-controlled rank,
+  Q/Q' application, and leading-R solves;
+- stable `factor_diagnostics` facts for Cholesky, LU, LDLT, and QR;
+- general/symmetric residuals, normwise backward error, and one-step
+  factor-based refinement correction;
+- explicit higher-limb residuals for x2-to-x3/x4 and x3-to-x4 evaluation;
 - explicit x2/x3/x4 GEMM calibration and inspectable route plans.
 
 The hot kernels map four independent matrix rows or right-hand sides into
@@ -73,6 +79,14 @@ y = solve(Flu, T.(randn(256, 8)); config)
 K = copy(A + transpose(A))
 Fldl = MultiFloatLinearAlgebra.ldlt!(K; config)
 z = solve(Fldl, T.(randn(256)); config)
+
+# Rank-revealing equality factorization (rank policy remains caller-owned)
+Fqr = rrqr!(copy(A))
+rank = numerical_rank(Fqr; rtol=T(256) * eps(T))
+qt_rhs = T.(randn(size(A, 1)))
+apply_q!(qt_rhs, Fqr; trans=:T)
+leading_solution = copy(qt_rhs[1:rank])
+solve_r!(leading_solution, Fqr, rank; config)
 ```
 
 The package deliberately does not pirate `LinearAlgebra.mul!`,
@@ -136,6 +150,68 @@ for Float64x2: about 1.16x at n=512 and 1.11x at n=1024. Float64x3 and
 Float64x4 do not clear the five-percent gate at n=1024 and therefore retain
 the direct route. These are machine results, not portable hard-coded profiles.
 
+## Reusable solver workspace
+
+`MFWorkspace` groups only material reusable storage: packed GEMM panels, LU
+pivots, LDLT metadata and weighted panels, and RRQR reflector/permutation
+metadata. Residual and correction arrays remain explicit caller-owned outputs.
+
+```julia
+workspace = MFWorkspace(
+    T;
+    factor_capacity=1024,
+    ldlt_block_capacity=16,
+    thread_count=Threads.nthreads(),
+    gemm_capacity=1024 * 32,
+)
+
+capacity = workspace_capacity(workspace)
+ensure_workspace_capacity!(
+    workspace;
+    factor_capacity=2048,
+    ldlt_block_capacity=16,
+    gemm_workers=Threads.nthreads(),
+    gemm_capacity=2048 * 32,
+)
+
+Flu = MultiFloatLinearAlgebra.lu!(copy(A); config, workspace)
+Fldl = MultiFloatLinearAlgebra.ldlt!(copy(K); config, workspace)
+Fqr = rrqr!(copy(E); workspace)
+```
+
+LU, LDLT, and RRQR factors created with `workspace=` borrow metadata. Starting
+another workspace-backed factorization, or growing `factor_capacity`, makes
+the previous borrowed factor invalid; public status, solve, diagnostic, and
+factor-access operations then throw explicitly. Use one workspace per live
+borrowed factor when factors must coexist. GEMM-only or LDLT-panel growth does
+not invalidate a live factor. A workspace is caller-owned and must not be used
+by concurrent calls. It never calibrates or mutates process-global state.
+
+Existing calls without `workspace=` retain independently owned metadata.
+`GemmWorkspace` also remains supported by `gemm!` and `residual!`.
+
+## Capability query
+
+`capabilities(T)` is a pure, immutable description of the public dense
+backend. It never benchmarks, calibrates, inspects a solver, or changes state.
+
+```julia
+facts = capabilities(Float64x3)
+facts.supported                  # true
+facts.transpose_gemv             # true
+facts.rrqr                       # true
+facts.mixed_residual_targets     # (x2=false, x3=false, x4=true)
+facts.reusable_workspace         # true
+```
+
+The fixed keys cover kernels, factorizations, vector/multi-RHS support,
+residual/correction primitives, workspace reuse, and threading. Unsupported
+limb counts report every operation as false; production calls still fail
+explicitly and are never replaced by another algorithm.
+
+The final read-only SDPX operation map and provider-readiness conclusion are
+in [`docs/SDPX_PROVIDER_READINESS.md`](docs/SDPX_PROVIDER_READINESS.md).
+
 ## Symmetric-indefinite LDLT
 
 The blocked path retains Bunch--Kaufman-style 1x1/2x2 pivot decisions. Each
@@ -193,6 +269,45 @@ The caller remains responsible for choosing the arithmetic type, deciding
 whether a fallback is allowed, assembling sparse or structured systems, and
 validating the final residual or certificate.
 
+For QR, `factor_permutation(F)` returns `p` such that `A[:, p] = Q*R`, and
+`factor_rdiag(F)` returns a copy of the signed R diagonal. Rank deficiency is
+a successful factorization. `numerical_rank(F; atol, rtol)` evaluates only the
+threshold supplied by the caller; its zero defaults mean exact nonzero rank.
+`factor_matrix(F)` remains borrowed compact storage and must not be mutated.
+
+`factor_diagnostics(F)` returns a stable NamedTuple of numerical facts. It
+reports failure locations, factor scales, LU/LDLT growth metrics, LDLT pivot
+counts and inertia, and QR rank at an explicitly supplied threshold. Returned
+pivot/permutation vectors are copies. Diagnostics never select a fallback or
+precision.
+
+Residual arithmetic uses one sign convention throughout:
+
+```text
+r = b - A*x
+```
+
+`residual!` supports vectors and multiple right-hand sides; `uplo=:lower` or
+`:upper` reads only an authoritative symmetric triangle.
+`normwise_backward_error(A, x, b, r)` reports
+`||r||inf / (||A||inf*||x||inf + ||b||inf)` using an overflow-safe scaled
+evaluation. `refinement_correction!(delta, F, r)` computes exactly one
+`delta = F \\ r`. MFLA does not decide whether to accept or repeat it.
+
+Higher-precision residual arithmetic is a separate, explicit operation:
+
+```julia
+residual_mixed!(r_x3, A_x2, x_x2, b_x2)
+residual_mixed!(r_x4, A_x2, x_x2, b_x2)
+residual_mixed!(r_x4, A_x3, x_x3, b_x3)
+```
+
+Vector and matrix right-hand sides are supported, including `uplo=:lower` or
+`:upper`. Every source value is converted before multiplication and
+subtraction; MFLA never computes a low-precision residual and then promotes
+it. Ordinary kernels remain strict same-type operations. There is no hidden
+precision escalation and no production `BigFloat` conversion.
+
 ## Validation
 
 The correctness suite covers Float64x2/x3/x4 on Julia 1.10, 1.11, and 1.12:
@@ -203,6 +318,9 @@ The correctness suite covers Float64x2/x3/x4 on Julia 1.10, 1.11, and 1.12:
 - blocked LU and vector/multi-RHS residuals;
 - LDLT 1x1 and forced 2x2 pivots;
 - blocked LDLT panel-boundary 2x2 cases and multi-RHS residuals.
+- RRQR reconstruction and orthogonality for tall, wide, and square matrices;
+- duplicate/zero/nearly dependent/scaled QR columns, Q/Q' application, and
+  vector/matrix leading-R solves.
 
 ## Benchmarks
 
@@ -222,9 +340,13 @@ Large throughput and calibration workflows are manual by design:
 ```bash
 julia -t 4 --project=benchmark benchmark/packed_gemm.jl 512 --generic
 julia -t 4 --project=benchmark benchmark/packed_gemm.jl 1024
-julia -t 4 --project=benchmark benchmark/calibrate_gemm.jl 512 1024 3 1.05
 julia -t 4 --project=benchmark benchmark/ldlt_scaling.jl 1024
 julia -t 4 --project=benchmark benchmark/kkt_ldlt.jl 1024
+julia -t 4 --project=. benchmark/mixed_residual.jl 257 129 4 5
+julia --project=. benchmark/workspace_cycles.jl 128 4
+julia -t 4 --project=. benchmark/shape_tuning.jl 7
+julia -t 4 --project=. benchmark/structured_x3.jl 7
+julia -t 4 --project=. benchmark/multi_rhs.jl 256 5
 ```
 
 ## Roadmap
@@ -233,29 +355,49 @@ The immediate goal is to become the authoritative MultiFloats dense backend
 that solver packages such as SDPX can rely on, not a general-purpose BLAS
 replacement. Work is sequenced in three stages.
 
-### Stage A — backend contract hardening
+### Completed
 
-1. Freeze the factorization public protocol behind `AbstractMFFactorization`
-   and its accessors so internal representation can evolve.
-2. Enforce machine-specific calibration compatibility and document the
-   one-based indexing / no-aliasing kernel contract.
-3. Add shape-aware GEMM calibration so the packed route is only enabled where
-   it is actually measured, rather than extrapolating square results.
+- Factorization public protocol: `AbstractMFFactorization`,
+  `factor_kind`/`factor_status`/`factor_matrix`, `size`/`eltype`, `issuccess`.
+- Machine-compatible GEMM calibration (`GemmProfile`, `profile_compatible`,
+  strict `with_gemm_profile`), inspectable route reasons, near-square auto
+  routing, and one-based-indexing / no-aliasing kernel contracts.
+- Float64x3 fused `mulacc_x3` direct GEMM, productionized on both AArch64 and
+  x86_64; structured GEMMT/SYRK x3 fusion conservatively gated to
+  Darwin + AArch64.
+- Transpose GEMV (`gemv!(...; trans=:T)`), vector TRSV (`trsv!`), and
+  authoritative-triangle SYMV (`symv!`), with factor vector solves routed
+  through TRSV.
+- Authoritative-triangle TRMM (`trmm!`) for left/right, lower/upper,
+  transposed/non-transposed, and unit/non-unit triangular products.
+- Downstream dense-kernel inventory, narrow packed-lower `syrk_packed!` with
+  reduction slices, and repeated-call allocation audit; no speculative
+  `syr2k!` or solver-scatter API was added.
+- Rank-revealing column-pivoted Householder QR (`rrqr!`/`MFQR`) with
+  caller-controlled `numerical_rank`, Q/Q' application, and leading-R solves.
+- Factor diagnostics for Cholesky/LU/LDLT/QR, including LU growth, LDLT
+  1x1/2x2 counts and inertia, and QR rank at a caller-supplied threshold.
+- Residual `b-A*x`, overflow-safe normwise backward error, and explicit
+  one-correction factor solves for vector and multi-RHS systems.
+- Explicit deterministic mixed residual evaluation for x2-to-x3/x4 and
+  x3-to-x4, with authoritative symmetric-triangle support.
+- Caller-owned `MFWorkspace` for packed GEMM, LU/LDLT/RRQR metadata, and LDLT
+  weighted panels, with explicit capacity and stale-factor detection.
+- Pure machine-readable `capabilities(T)` facts, including exact mixed
+  residual target types.
+- Aqua type-piracy checking enabled.
 
-### Stage B — arithmetic-network productionization
+### Completed roadmap review
 
-4. Promote the x3 fused `mulacc` prototype through real GEMM 256/512/1024
-   A/B, BigFloat differential, and 1T/4T gates. It enters production only if
-   512/1024 stay above five percent without weakening the accuracy gate.
-5. Add optional mixed-precision residual/refinement primitives without
-   importing solver policy.
+Proof-boundary and adversarial validation, the durable solver-cycle benchmark,
+and the read-only SDPX provider-readiness review are complete. The reproducible
+arithmetic contract is in `docs/MULACC_X3_PROOF_CONTRACT.md`, the benchmark
+entry point is `benchmark/solver_suite.jl`, and the downstream operation map is
+in `docs/SDPX_PROVIDER_READINESS.md`.
 
-### Stage C — SDPX replacement primitives
+### Deferred
 
-6. Add transpose-GEMV, TRSV, lower-SYMV, shared workspace, generalized SYRK,
-   and right TRMM, deleting one duplicate SDPX implementation at a time with a
-   correctness/iteration/time/RSS comparison.
-7. Add proof-friendly arithmetic-network boundaries tied to MultiFloatProofs.
-
-Sparse supernodal kernels and GPU kernels are deliberately deferred until the
-CPU numerical contract is frozen and the solver closure above is complete.
+- Sparse supernodal and GPU kernels, x5–x8 arithmetic, and BigFloat runtime
+  fallback remain out of scope until the dense CPU contract is frozen.
+- Proof integration lives in a companion project; MFLA keeps stable
+  arithmetic-network boundaries for it.

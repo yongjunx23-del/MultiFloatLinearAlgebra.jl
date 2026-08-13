@@ -1,0 +1,42 @@
+name: Solver-Relevant Benchmark Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      dimension:
+        description: Dense system dimension
+        required: true
+        default: "96"
+      samples:
+        description: Median sample count
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  solver-suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate package environment
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run solver-relevant suite
+        run: >-
+          julia -t 4 --project=. benchmark/solver_suite.jl
+          ${{ inputs.dimension }} ${{ inputs.samples }}
+          solver-suite-${{ runner.os }}-${{ runner.arch }}.tsv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: solver-suite-${{ runner.os }}-${{ runner.arch }}
+          path: solver-suite-*.tsv
