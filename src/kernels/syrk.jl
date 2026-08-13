@@ -19,7 +19,7 @@ function _syrk_column!(
                 panel[k, row + 2],
                 panel[k, row + 3],
             )
-            accumulator = _mulacc(accumulator, values, V4(panel[k, column]))
+            accumulator = _structured_mulacc(accumulator, values, V4(panel[k, column]))
         end
         result = V4(alpha) * accumulator + V4(beta) * V4(
             output[row, column],

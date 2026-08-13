@@ -66,10 +66,47 @@ end
 _supports_fused_mulacc(::Type{MultiFloat{Float64,3}}) = true
 _supports_fused_mulacc(::Type{<:MultiFloat}) = false
 
-@inline function _mulacc(acc::MultiFloatVec{4,T,N}, x::MultiFloatVec{4,T,N}, y::MultiFloatVec{4,T,N}) where {T,N}
+# GEMM arithmetic: the fused Float64x3 direct GEMM uses `mulacc_x3`; every
+# other supported type keeps the standard `acc + x*y` accumulation. GEMM keeps
+# fused x3 on both AArch64 and x86_64 where it measured positive.
+@inline function _gemm_mulacc(
+    acc::MultiFloatVec{4,T,N},
+    x::MultiFloatVec{4,T,N},
+    y::MultiFloatVec{4,T,N},
+) where {T,N}
     return acc + x * y
 end
 
-@inline function _mulacc(acc::MultiFloatVec{4,Float64,3}, x::MultiFloatVec{4,Float64,3}, y::MultiFloatVec{4,Float64,3})
+@inline function _gemm_mulacc(
+    acc::MultiFloatVec{4,Float64,3},
+    x::MultiFloatVec{4,Float64,3},
+    y::MultiFloatVec{4,Float64,3},
+)
     return mulacc_x3(acc, x, y)
+end
+
+# Structured-update arithmetic (GEMMT/SYRK). The fused x3 network regressed on
+# x86_64 for these kernels, so it is fused only on AArch64 where the measured
+# evidence is positive. This is a compile-time gate: it introduces no hot-loop
+# branch and is easy to replace later with explicit machine calibration.
+_structured_fuses_x3() = Sys.ARCH === :aarch64
+
+@inline function _structured_mulacc(
+    acc::MultiFloatVec{4,T,N},
+    x::MultiFloatVec{4,T,N},
+    y::MultiFloatVec{4,T,N},
+) where {T,N}
+    return acc + x * y
+end
+
+@inline function _structured_mulacc(
+    acc::MultiFloatVec{4,Float64,3},
+    x::MultiFloatVec{4,Float64,3},
+    y::MultiFloatVec{4,Float64,3},
+)
+    @static if Sys.ARCH === :aarch64
+        return mulacc_x3(acc, x, y)
+    else
+        return acc + x * y
+    end
 end

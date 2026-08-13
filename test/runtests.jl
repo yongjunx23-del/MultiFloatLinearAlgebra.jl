@@ -74,6 +74,35 @@ end
                 @test max_relative_error(output, reference) <= tolerance(T, n)
             end
 
+            @testset "transpose gemv!" begin
+                # Rectangular tall, wide, square, and odd shapes plus alpha/beta.
+                for (m, nn) in ((8, 12), (12, 8), (7, 7), (1, 9), (9, 1), (11, 13))
+                    At = T.(randn(m, nn))
+                    xt = T.(randn(m))
+                    y0 = T.(randn(nn))
+                    yt = copy(y0)
+                    gemv!(yt, At, xt, T(2), T(3); trans=:T, config=config)
+                    reference = T(2) * (transpose(At) * xt) + T(3) * y0
+                    @test max_relative_error(yt, reference) <= tolerance(T, 4 * max(m, nn))
+                end
+
+                # Deterministic ascending reduction: stale memory must not matter.
+                At = T.(randn(16, 16))
+                xt = T.(randn(16))
+                clean = zeros(T, 16)
+                dirty = fill(T(NaN), 16)
+                gemv!(clean, At, xt; trans=:T, config=config)
+                gemv!(dirty, At, xt; trans=:T, config=config)
+                @test clean == dirty
+
+                @test_throws ArgumentError gemv!(
+                    zeros(T, 4), T.(randn(4, 4)), T.(randn(4)); trans=:bad, config=config,
+                )
+                @test_throws DimensionMismatch gemv!(
+                    zeros(T, 3), T.(randn(4, 4)), T.(randn(4)); trans=:T, config=config,
+                )
+            end
+
             @testset "direct and packed gemm!" begin
                 reference = A * B
                 direct = zeros(T, n, n)
@@ -249,6 +278,91 @@ end
                     config=config,
                 )
                 @test max_relative_error(unit_rhs, Xleft) <= tolerance(T, 8n)
+            end
+
+            @testset "trsv!" begin
+                # Compare the single-RHS trsv! against the one-column trsm!
+                # reference across every uplo/trans/diag combination, well- and
+                # badly-scaled, plus explicit forward/back substitution checks.
+                for uplo in (:lower, :upper), trans in (:N, :T), unit in (false, true)
+                    triangular = triangular_matrix(T, n, uplo; unit=unit)
+                    opA = trans === :N ? triangular : transpose(triangular)
+                    x0 = T.(randn(n))
+                    b = opA * x0
+
+                    via_trsv = copy(b)
+                    trsv!(
+                        via_trsv, triangular;
+                        uplo=uplo, trans=trans,
+                        diag=unit ? :unit : :nonunit, config=config,
+                    )
+                    @test max_relative_error(via_trsv, x0) <= tolerance(T, 8n)
+
+                    # Exact agreement with the one-column TRSM path.
+                    via_trsm = copy(b)
+                    trsm!(
+                        reshape(via_trsm, n, 1), triangular;
+                        side=:left, uplo=uplo, trans=trans,
+                        diag=unit ? :unit : :nonunit, config=config,
+                    )
+                    @test via_trsv == via_trsm
+                end
+
+                # Badly scaled triangular matrix still solves.
+                bad = triangular_matrix(T, n, :lower)
+                for i in 1:n
+                    bad[i, i] *= T(1e-20 + 1e20 * (i / n))
+                end
+                x0 = T.(randn(n))
+                rhs = bad * x0
+                trsv!(rhs, bad; uplo=:lower, trans=:N, diag=:nonunit, config=config)
+                @test max_relative_error(rhs, x0) <= tolerance(T, 32n)
+
+                @test_throws DimensionMismatch trsv!(
+                    zeros(T, n - 1), bad; uplo=:lower, config=config,
+                )
+            end
+
+            @testset "symv!" begin
+                for uplo in (:lower, :upper)
+                    Asym = T.(randn(n, n))
+                    S = T.(Matrix(Asym + transpose(Asym)))
+
+                    # Corrupt the inactive strict triangle with NaN; symv! must
+                    # read only the authoritative triangle.
+                    if uplo === :lower
+                        for r in 1:n, c in (r + 1):n
+                            S[r, c] = T(NaN)
+                        end
+                    else
+                        for r in 1:n, c in 1:(r - 1)
+                            S[r, c] = T(NaN)
+                        end
+                    end
+
+                    x = T.(randn(n))
+                    y0 = T.(randn(n))
+                    y = copy(y0)
+                    symv!(y, S, x, T(2), T(3); uplo=uplo, config=config)
+
+                    reference = zeros(T, n)
+                    for i in 1:n
+                        acc = zero(T)
+                        for j in 1:n
+                            v = uplo === :lower ?
+                                (j <= i ? S[i, j] : S[j, i]) :
+                                (j >= i ? S[i, j] : S[j, i])
+                            acc += v * x[j]
+                        end
+                        reference[i] = T(2) * acc + T(3) * y0[i]
+                    end
+                    @test max_relative_error(y, reference) <= tolerance(T, 4n)
+                end
+
+                @test_throws ArgumentError symv!(
+                    zeros(T, n), T.(randn(n, n)), T.(randn(n));
+                    uplo=:bad, config=config,
+                )
             end
 
             @testset "cholesky!" begin
@@ -520,6 +634,30 @@ end
                     tolerance(T, 128n)
             end
 
+            @testset "multithread transpose gemv / symv" begin
+                single = KernelConfig(thread_count=1)
+                multi = KernelConfig(thread_count=2)
+
+                # transpose GEMV on a shape large enough to thread.
+                At = T.(randn(96, 80))
+                xt = T.(randn(96))
+                ys = zeros(T, 80)
+                ym = zeros(T, 80)
+                gemv!(ys, At, xt; trans=:T, config=single)
+                gemv!(ym, At, xt; trans=:T, config=multi)
+                @test ys == ym
+
+                # SYMV threaded matches single-thread on the authoritative triangle.
+                R = randn(96, 96)
+                S = T.(Matrix(R + transpose(R)))
+                xs = T.(randn(96))
+                ysv = zeros(T, 96)
+                ymv = zeros(T, 96)
+                symv!(ysv, S, xs; uplo=:lower, config=single)
+                symv!(ymv, S, xs; uplo=:lower, config=multi)
+                @test ysv == ymv
+            end
+
             @testset "vector/matrix solve equivalence" begin
                 R = randn(n, n)
                 S = R * transpose(R) + n * I
@@ -586,6 +724,53 @@ end
                 @test MultiFloatLinearAlgebra.factor_status(Fld) == 0
                 @test eltype(Fld) === T
             end
+        end
+    end
+
+    @testset "structured mulacc policy" begin
+        # The structured (GEMMT/SYRK) x3 accumulation is fused only on
+        # AArch64, where it measured positive; x86_64 keeps standard `acc+x*y`.
+        @test MultiFloatLinearAlgebra._structured_fuses_x3() == (Sys.ARCH === :aarch64)
+
+        # For every supported type, GEMMT/SYRK write only the authoritative
+        # lower triangle and reproduce the standard ascending reduction. On
+        # x3 this holds on both architectures because the fused network is
+        # bitwise-identical to the reference in the committed adversarial suite.
+        for T in (Float64x2, Float64x3, Float64x4)
+            reduction, rows = 11, 16
+            left = T.(randn(rows, reduction))
+            right = T.(randn(rows, reduction))
+
+            Cstd = zeros(T, rows, rows)
+            Cfus = zeros(T, rows, rows)
+            for column in 1:rows
+                for row in column:rows
+                    acc = zero(T)
+                    for k in 1:reduction
+                        acc += left[row, k] * right[column, k]
+                    end
+                    Cstd[row, column] = acc
+                end
+            end
+            gemmt!(Cfus, left, right; config=KernelConfig(thread_count=1))
+            @test Cfus == Cstd
+            @test iszero(triu(Cfus, 1))
+
+            panel = T.(randn(reduction, rows))
+            Sstd = zeros(T, rows, rows)
+            Sfus = zeros(T, rows, rows)
+            for column in 1:rows
+                for row in column:rows
+                    acc = zero(T)
+                    for k in 1:reduction
+                        acc += panel[k, row] * panel[k, column]
+                    end
+                    Sstd[row, column] = acc
+                end
+            end
+            syrk!(Sfus, panel; config=KernelConfig(thread_count=1))
+            @test Sfus == Sstd
+            @test iszero(triu(Sfus, 1))
         end
     end
 

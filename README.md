@@ -12,10 +12,12 @@ in their own layers.
 ## Implemented backend
 
 - deterministic `mfdot`;
-- SIMD/threaded `gemv!`;
+- SIMD/threaded `gemv!` with transpose (`trans=:T`) support;
 - direct and B-panel-packed `gemm!`;
 - lower-triangular `syrk!` and `gemmt!`;
 - BLAS-like left/right `trsm!`;
+- single-RHS vector `trsv!`;
+- authoritative-triangle `symv!`;
 - blocked lower Cholesky using TRSM/SYRK;
 - blocked partial-pivoting LU using TRSM/GEMM;
 - Bunch--Kaufman-style symmetric-indefinite LDLT with 1x1/2x2 pivots;

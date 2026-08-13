@@ -301,8 +301,8 @@ end
             A[row + 2, k],
             A[row + 3, k],
         )
-        first_accumulator = mulacc_x3(first_accumulator, values, V3(B[k, column]))
-        second_accumulator = mulacc_x3(second_accumulator, values, V3(B[k, column + 1]))
+        first_accumulator = _gemm_mulacc(first_accumulator, values, V3(B[k, column]))
+        second_accumulator = _gemm_mulacc(second_accumulator, values, V3(B[k, column + 1]))
     end
 
     first_result = V3(alpha) * first_accumulator + V3(beta) * V3(
@@ -342,7 +342,7 @@ end
             A[row + 2, k],
             A[row + 3, k],
         )
-        accumulator = mulacc_x3(accumulator, values, V3(B[k, column]))
+        accumulator = _gemm_mulacc(accumulator, values, V3(B[k, column]))
     end
     result = V3(alpha) * accumulator + V3(beta) * V3(
         C[row, column],

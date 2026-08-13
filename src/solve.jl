@@ -7,8 +7,8 @@ of right-hand sides is accepted. `F` must be successful (`issuccess(F)`),
 otherwise a `PosDefException` or `SingularException` is thrown.
 
 Dispatch selects the triangular solve for `MFCholesky`, `MFLU`, or `MFLDLT`.
-Vector right-hand sides are solved through the same package `trsm!` kernel as
-matrix right-hand sides by treating them as a single column.
+Vector right-hand sides use the dedicated [`trsv!`](@ref) single-column kernel,
+while matrix right-hand sides use [`trsm!`](@ref).
 """
 function ldiv!(
     destination::AbstractVector{MF},
@@ -21,20 +21,17 @@ function ldiv!(
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
 
-    rhs = reshape(destination, n, 1)
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:lower,
         trans=:N,
         diag=:nonunit,
         config=config,
     )
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:lower,
         trans=:T,
         diag=:nonunit,
@@ -117,20 +114,17 @@ function ldiv!(
         throw(DimensionMismatch("right-hand side length differs"))
     _apply_pivots!(destination, F.ipiv)
 
-    rhs = reshape(destination, n, 1)
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:lower,
         trans=:N,
         diag=:unit,
         config=config,
     )
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:upper,
         trans=:N,
         diag=:nonunit,
@@ -295,21 +289,18 @@ function ldiv!(
         throw(DimensionMismatch("right-hand side length differs"))
     _apply_ldlt_pivots_forward!(destination, F)
 
-    rhs = reshape(destination, n, 1)
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:lower,
         trans=:N,
         diag=:unit,
         config=config,
     )
     _ldlt_solve_d!(destination, F)
-    trsm!(
-        rhs,
+    trsv!(
+        destination,
         F.factors;
-        side=:left,
         uplo=:lower,
         trans=:T,
         diag=:unit,

@@ -20,7 +20,7 @@ function _gemmt_column!(
                 left[row + 2, k],
                 left[row + 3, k],
             )
-            accumulator = _mulacc(accumulator, values, V4(right[column, k]))
+            accumulator = _structured_mulacc(accumulator, values, V4(right[column, k]))
         end
         result = V4(alpha) * accumulator + V4(beta) * V4(
             output[row, column],
