@@ -6,11 +6,14 @@
 # the partially compressed product prefix straight into the accumulator add
 # network, shortening the dependency chain and removing redundant rounding.
 #
-# This changes intermediate rounding relative to `acc + x * y`, so it is not
-# bitwise identical to the reference path. It is deterministic, and the fused
-# network has been validated with a 512-bit BigFloat differential (maximum
-# error ratio 1.000 against the reference across random / wide-range /
-# cancellation / alternating-sign / edge cases).
+# This changes intermediate rounding relative to `acc + x * y` in principle,
+# but the fused network has been empirically bitwise-identical to the reference
+# over the committed adversarial validation suite (random / wide-range /
+# cancellation / alternating-sign / near-underflow / near-overflow / zero), and
+# a 512-bit BigFloat differential shows no degradation (error ratio 1.000).
+# This is a deterministic optimization, not a universal identity: a formal
+# proof of bitwise equivalence across the EFT network would be required before
+# claiming mathematical identity.
 
 @inline function _product_prefix_x3(x::MultiFloatVec{4,Float64,3}, y::MultiFloatVec{4,Float64,3})
     x0, x1, x2 = x._limbs
@@ -59,3 +62,6 @@ end
     a0, a1, a2 = acc._limbs
     return _raw_mfadd3(a0, a1, a2, p0, p1, p2)
 end
+
+_supports_fused_mulacc(::Type{MultiFloat{Float64,3}}) = true
+_supports_fused_mulacc(::Type{<:MultiFloat}) = false

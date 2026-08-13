@@ -118,7 +118,7 @@ end
                 builtin = default_gemm_profile(T; thread_count=2)
                 resolved = with_gemm_profile(config, builtin)
                 plan = gemm_plan(T, 256, 256, 256, resolved)
-                @test plan.strategy in (:direct, :packed)
+                @test plan.strategy in (:direct, :fused, :packed)
                 @test builtin.source === :builtin
                 @test builtin.thread_count == min(2, Threads.nthreads())
                 @test builtin.fingerprint.julia_threads_available == Threads.nthreads()
@@ -157,6 +157,7 @@ end
             end
 
             @testset "near-square auto policy" begin
+                fused_default = T === Float64x3
                 profile = GemmProfile{T}(
                     :auto,
                     16,
@@ -172,10 +173,10 @@ end
                 reduction = gemm_plan(T, 32, 16, 32, cfg)
                 @test square.strategy === :packed
                 @test square.reason === :auto_above_crossover
-                @test tall.strategy === :direct
-                @test tall.reason === :auto_outside_calibrated_shape
-                @test reduction.strategy === :direct
-                @test reduction.reason === :auto_reduction_too_small
+                @test tall.strategy === (fused_default ? :fused : :direct)
+                @test tall.reason === (fused_default ? :auto_fused_direct : :auto_outside_calibrated_shape)
+                @test reduction.strategy === (fused_default ? :fused : :direct)
+                @test reduction.reason === (fused_default ? :auto_fused_direct : :auto_reduction_too_small)
 
                 large_crossover = GemmProfile{T}(
                     :auto,
@@ -188,8 +189,8 @@ end
                 )
                 large_cfg = with_gemm_profile(config, large_crossover)
                 below = gemm_plan(T, 256, 256, 256, large_cfg)
-                @test below.strategy === :direct
-                @test below.reason === :auto_below_crossover
+                @test below.strategy === (fused_default ? :fused : :direct)
+                @test below.reason === (fused_default ? :auto_fused_direct : :auto_below_crossover)
             end
 
             @testset "syrk!" begin
@@ -592,7 +593,6 @@ end
         T3 = Float64x3
         V3 = MultiFloatVec{4,Float64,3}
 
-        # Full three-limb data so the x3 product is not trivially exact.
         function rich_big(rng, exponent; sign=1)
             base = ldexp(BigFloat(0.5 + rand(rng)), exponent)
             c1 = ldexp(BigFloat(randn(rng)), exponent - 70)
@@ -600,36 +600,72 @@ end
             return sign * (base + c1 + c2)
         end
 
+        function mode_triple(rng, mode, trial, lane)
+            sign = rand(rng, Bool) ? 1 : -1
+            if mode === :random
+                ex = rand(rng, -40:40); ey = rand(rng, -40:40); ea = rand(rng, -40:40)
+                return (T3(rich_big(rng, ea; sign=sign)),
+                        T3(rich_big(rng, ex; sign=sign)),
+                        T3(rich_big(rng, ey; sign=sign)))
+            elseif mode === :wide
+                ex = rand(rng, -300:300); ey = rand(rng, -300:300); ea = rand(rng, -500:500)
+                return (T3(rich_big(rng, ea; sign=sign)),
+                        T3(rich_big(rng, ex; sign=sign)),
+                        T3(rich_big(rng, ey; sign=sign)))
+            elseif mode === :near_underflow
+                ex = rand(rng, -1080:-1040); ey = rand(rng, -1080:-1040); ea = rand(rng, -1080:-1040)
+                return (T3(rich_big(rng, ea; sign=sign)),
+                        T3(rich_big(rng, ex; sign=sign)),
+                        T3(rich_big(rng, ey; sign=sign)))
+            elseif mode === :near_overflow
+                ex = rand(rng, 1010:1020); ey = rand(rng, 1010:1020); ea = rand(rng, 1010:1020)
+                return (T3(rich_big(rng, ea; sign=sign)),
+                        T3(rich_big(rng, ex; sign=sign)),
+                        T3(rich_big(rng, ey; sign=sign)))
+            else
+                error("unknown mode")
+            end
+        end
+
+        function limbs_bitwise_equal(a::T3, b::T3)
+            la = a._limbs
+            lb = b._limbs
+            return all(
+                reinterpret(UInt64, la[i]) == reinterpret(UInt64, lb[i]) for i in 1:3
+            )
+        end
+
         rng = MersenneTwister(0x3eed)
         @testset "bitwise equality with standard accumulation" begin
             neq = Ref(0)
             total = Ref(0)
             setprecision(BigFloat, 512) do
-                for trial in 1:64
-                    lanes_acc = Vector{T3}(undef, 4)
-                    lanes_x = Vector{T3}(undef, 4)
-                    lanes_y = Vector{T3}(undef, 4)
-                    for lane in 1:4
-                        lanes_acc[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
-                        lanes_x[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
-                        lanes_y[lane] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
-                    end
-                    acc = V3(lanes_acc...)
-                    x = V3(lanes_x...)
-                    y = V3(lanes_y...)
-                    standard = acc + x * y
-                    fused = MultiFloatLinearAlgebra.mulacc_x3(acc, x, y)
-                    for lane in 1:4
-                        total[] += 1
-                        standard[lane] != fused[lane] && (neq[] += 1)
+                for mode in (:random, :wide, :near_underflow, :near_overflow)
+                    for trial in 1:64
+                        lanes_acc = Vector{T3}(undef, 4)
+                        lanes_x = Vector{T3}(undef, 4)
+                        lanes_y = Vector{T3}(undef, 4)
+                        for lane in 1:4
+                            lanes_acc[lane], lanes_x[lane], lanes_y[lane] =
+                                mode_triple(rng, mode, trial, lane)
+                        end
+                        acc = V3(lanes_acc...)
+                        x = V3(lanes_x...)
+                        y = V3(lanes_y...)
+                        standard = acc + x * y
+                        fused = MultiFloatLinearAlgebra.mulacc_x3(acc, x, y)
+                        for lane in 1:4
+                            total[] += 1
+                            limbs_bitwise_equal(standard[lane], fused[lane]) || (neq[] += 1)
+                        end
                     end
                 end
             end
             @test neq[] == 0
-            @test total[] == 256
+            @test total[] == 1024
         end
 
-        @testset "fused GEMM strategy" begin
+        @testset "fused GEMM correctness (odd shapes and panels)" begin
             n = 24
             A = Matrix{T3}(undef, n, n)
             B = Matrix{T3}(undef, n, n)
@@ -640,26 +676,78 @@ end
                 end
             end
 
-            Cstandard = zeros(T3, n, n)
-            Cfused = zeros(T3, n, n)
+            for (m, k, nn) in ((24, 24, 24), (23, 24, 25), (25, 23, 24), (5, 5, 5), (24, 24, 5))
+                A = Matrix{T3}(undef, m, k)
+                B = Matrix{T3}(undef, k, nn)
+                setprecision(BigFloat, 512) do
+                    for j in 1:k, i in 1:m
+                        A[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    end
+                    for j in 1:nn, i in 1:k
+                        B[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    end
+                end
+                for panel in (3, 5, 16)
+                    Cstandard = zeros(T3, m, nn)
+                    Cfused = zeros(T3, m, nn)
+                    MultiFloatLinearAlgebra.gemm!(
+                        Cstandard, A, B;
+                        config=KernelConfig(thread_count=1, gemm_strategy=:direct),
+                    )
+                    MultiFloatLinearAlgebra.gemm!(
+                        Cfused, A, B;
+                        config=KernelConfig(
+                            thread_count=2,
+                            gemm_strategy=:fused,
+                            gemm_panel_columns=panel,
+                        ),
+                    )
+                    @test Cfused == Cstandard
+                end
+            end
+
+            # alpha/beta on the fused path.
+            A = Matrix{T3}(undef, 24, 24)
+            B = Matrix{T3}(undef, 24, 24)
+            C0 = zeros(T3, 24, 24)
+            setprecision(BigFloat, 512) do
+                for j in 1:24, i in 1:24
+                    A[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    B[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    C0[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                end
+            end
+            Cstandard = copy(C0)
+            Cfused = copy(C0)
             MultiFloatLinearAlgebra.gemm!(
-                Cstandard, A, B;
+                Cstandard, A, B, T3(2), T3(3);
                 config=KernelConfig(thread_count=1, gemm_strategy=:direct),
             )
             MultiFloatLinearAlgebra.gemm!(
-                Cfused, A, B;
+                Cfused, A, B, T3(2), T3(3);
                 config=KernelConfig(thread_count=1, gemm_strategy=:fused),
             )
             @test Cfused == Cstandard
 
             # Fused is x3-only.
-            A2 = Float64x2.(randn(n, n))
-            B2 = Float64x2.(randn(n, n))
-            C2 = zeros(Float64x2, n, n)
+            A2 = Float64x2.(randn(8, 8))
+            B2 = Float64x2.(randn(8, 8))
+            C2 = zeros(Float64x2, 8, 8)
             @test_throws ArgumentError MultiFloatLinearAlgebra.gemm!(
                 C2, A2, B2;
                 config=KernelConfig(thread_count=1, gemm_strategy=:fused),
             )
+
+            # :auto routes x3 to fused, while :direct stays the reference path.
+            plan_auto = MultiFloatLinearAlgebra.gemm_plan(
+                T3, 32, 32, 32, KernelConfig(thread_count=1),
+            )
+            @test plan_auto.strategy === :fused
+            @test plan_auto.reason === :auto_fused_direct
+            plan_direct = MultiFloatLinearAlgebra.gemm_plan(
+                T3, 32, 32, 32, KernelConfig(thread_count=1, gemm_strategy=:direct),
+            )
+            @test plan_direct.strategy === :direct
         end
     end
 

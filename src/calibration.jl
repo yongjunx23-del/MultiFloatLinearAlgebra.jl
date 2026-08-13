@@ -32,7 +32,9 @@ end
 
 Return the built-in x1/x2/x3/x4 panel geometry without enabling the packed
 route. Built-in profiles use an infinite crossover so the established direct
-kernel remains authoritative until `calibrate_gemm` supplies measured evidence.
+family remains authoritative until `calibrate_gemm` supplies measured evidence.
+The direct family is the standard direct kernel, except Float64x3, which uses
+the fused `mulacc_x3` kernel.
 """
 function default_gemm_profile(
     ::Type{MF};
@@ -312,7 +314,7 @@ function calibrate_gemm(
     end
 
     profile = GemmProfile{MF}(
-        crossover == typemax(Int) ? :direct : :auto,
+        :auto,
         best_panel,
         best_micro,
         crossover,

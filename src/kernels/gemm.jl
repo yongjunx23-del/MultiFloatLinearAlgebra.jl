@@ -24,6 +24,15 @@ Resolve the inspectable dense-GEMM route. `:auto` never benchmarks implicitly;
 it uses the stored crossover and the type-specific panel/microkernel defaults.
 Use `calibrate_gemm` to produce a machine-specific profile explicitly.
 
+`gemm_strategy` accepts:
+
+- `:auto` — packed when calibration clears the crossover, otherwise the direct
+  family (the fused `mulacc_x3` kernel for Float64x3, the standard kernel
+  otherwise);
+- `:direct` — the standard direct kernel, kept as a reference baseline;
+- `:packed` — the B-panel-packed kernel;
+- `:fused` — the fused Float64x3 direct kernel (x3 only).
+
 `gemm_packed_crossover` is expressed as an equivalent square edge length: the
 packed route is eligible once the total `m*k*n` work reaches `crossover^3`, the
 reduction dimension `k` is at least half that edge, and the shape is near-square
@@ -45,7 +54,7 @@ function gemm_plan(
         throw(ArgumentError("gemm_strategy must be :auto, :direct, :packed, or :fused"))
 
     if strategy === :fused
-        _limb_count(MF) == 3 ||
+        _supports_fused_mulacc(MF) ||
             throw(ArgumentError("gemm_strategy=:fused is only available for Float64x3"))
         panel_columns = config.gemm_panel_columns > 0 ?
                         config.gemm_panel_columns :
@@ -105,9 +114,13 @@ function gemm_plan(
         :auto_above_crossover
     end
     use_packed = reason === :auto_above_crossover
+    strategy = use_packed ? :packed :
+               _supports_fused_mulacc(MF) ? :fused : :direct
+    resolved_reason = use_packed ? reason :
+                      _supports_fused_mulacc(MF) ? :auto_fused_direct : reason
     return GemmPlan(
-        use_packed ? :packed : :direct,
-        reason,
+        strategy,
+        resolved_reason,
         panel_columns,
         micro_columns,
         workers,
@@ -311,6 +324,92 @@ end
     return nothing
 end
 
+@inline function _gemm_store_single_fused!(
+    C::AbstractMatrix{MultiFloat{Float64,3}},
+    A::AbstractMatrix{MultiFloat{Float64,3}},
+    B::AbstractMatrix{MultiFloat{Float64,3}},
+    row::Int,
+    column::Int,
+    alpha::MultiFloat{Float64,3},
+    beta::MultiFloat{Float64,3},
+)
+    V3 = MultiFloatVec{4,Float64,3}
+    accumulator = zero(V3)
+    @inbounds for k in axes(A, 2)
+        values = V3(
+            A[row, k],
+            A[row + 1, k],
+            A[row + 2, k],
+            A[row + 3, k],
+        )
+        accumulator = mulacc_x3(accumulator, values, V3(B[k, column]))
+    end
+    result = V3(alpha) * accumulator + V3(beta) * V3(
+        C[row, column],
+        C[row + 1, column],
+        C[row + 2, column],
+        C[row + 3, column],
+    )
+    @inbounds for lane in 1:4
+        C[row + lane - 1, column] = result[lane]
+    end
+    return nothing
+end
+
+function _gemm_direct_column_range_fused!(
+    C::AbstractMatrix{MultiFloat{Float64,3}},
+    A::AbstractMatrix{MultiFloat{Float64,3}},
+    B::AbstractMatrix{MultiFloat{Float64,3}},
+    alpha::MultiFloat{Float64,3},
+    beta::MultiFloat{Float64,3},
+    first_column::Int,
+    last_column::Int,
+)
+    MF3 = MultiFloat{Float64,3}
+    m = size(A, 1)
+    column = first_column
+
+    @inbounds while column + 1 <= last_column
+        row = 1
+        while row + 3 <= m
+            _gemm_store_pair_fused!(C, A, B, row, column, alpha, beta)
+            row += 4
+        end
+        while row <= m
+            first_accumulator = zero(MF3)
+            second_accumulator = zero(MF3)
+            for k in axes(A, 2)
+                a = A[row, k]
+                first_accumulator += a * B[k, column]
+                second_accumulator += a * B[k, column + 1]
+            end
+            C[row, column] =
+                alpha * first_accumulator + beta * C[row, column]
+            C[row, column + 1] =
+                alpha * second_accumulator + beta * C[row, column + 1]
+            row += 1
+        end
+        column += 2
+    end
+
+    if column <= last_column
+        row = 1
+        while row + 3 <= m
+            _gemm_store_single_fused!(C, A, B, row, column, alpha, beta)
+            row += 4
+        end
+        while row <= m
+            accumulator = zero(MF3)
+            for k in axes(A, 2)
+                accumulator += A[row, k] * B[k, column]
+            end
+            C[row, column] = alpha * accumulator + beta * C[row, column]
+            row += 1
+        end
+    end
+    return nothing
+end
+
 function _gemm_direct_fused!(
     C::AbstractMatrix{MultiFloat{Float64,3}},
     A::AbstractMatrix{MultiFloat{Float64,3}},
@@ -319,21 +418,12 @@ function _gemm_direct_fused!(
     beta::MultiFloat{Float64,3},
     plan::GemmPlan,
 )
-    m = size(A, 1)
     n = size(B, 2)
     jobs = cld(n, plan.panel_columns)
     workers = plan.workers
 
-    run = function (first_column, last_column)
-        @inbounds for column in first_column:2:(last_column - 1)
-            for row in 1:4:(m - 3)
-                _gemm_store_pair_fused!(C, A, B, row, column, alpha, beta)
-            end
-        end
-    end
-
     if workers == 1 || jobs <= 1
-        run(1, n)
+        _gemm_direct_column_range_fused!(C, A, B, alpha, beta, 1, n)
         return C
     end
 
@@ -342,7 +432,9 @@ function _gemm_direct_fused!(
             for job in worker:workers:jobs
                 first_column = (job - 1) * plan.panel_columns + 1
                 last_column = min(job * plan.panel_columns, n)
-                run(first_column, last_column)
+                _gemm_direct_column_range_fused!(
+                    C, A, B, alpha, beta, first_column, last_column,
+                )
             end
         end
     end
@@ -574,8 +666,10 @@ end
 CPU matrix multiplication specialized for `MultiFloat{T,N}`. The direct route
 uses four SIMD row lanes and two output columns. The packed route stores each
 B panel in reduction-major order, then reuses every A lane load across a
-2- or 4-column register microkernel. Output-column panels have disjoint task
-ownership. Passing `GemmWorkspace` removes repeated packing-buffer allocation.
+2- or 4-column register microkernel. The fused Float64x3 route uses the same
+four-lane direct layout but replaces `acc += x*y` with the `mulacc_x3` fused
+multiply-accumulate network. Output-column panels have disjoint task ownership.
+Passing `GemmWorkspace` removes repeated packing-buffer allocation.
 
 The kernel requires one-based indexing and does not support aliasing: `C` must
 not share storage with `A` or `B`.
@@ -600,11 +694,7 @@ function gemm!(
     if plan.strategy === :packed
         return _gemm_packed!(C, A, B, alpha, beta, plan, workspace)
     elseif plan.strategy === :fused
-        if m % 4 == 0 && n % 2 == 0
-            return _gemm_direct_fused!(C, A, B, alpha, beta, plan)
-        end
-        # Non-fusable shape falls back to the standard direct kernel.
-        return _gemm_direct!(C, A, B, alpha, beta, plan)
+        return _gemm_direct_fused!(C, A, B, alpha, beta, plan)
     end
     return _gemm_direct!(C, A, B, alpha, beta, plan)
 end
