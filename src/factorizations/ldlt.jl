@@ -11,13 +11,11 @@ struct MFLDLT{
     blocks::B
     info::Int
     original_maximum::MF
-    lease::Union{Nothing,_FactorWorkspaceLease{MF}}
 end
 
 factor_kind(::MFLDLT) = :ldlt
-@inline _check_factor_valid(F::MFLDLT) = _check_factor_lease(F.lease)
-factor_status(F::MFLDLT) = (_check_factor_lease(F.lease); F.info)
-factor_matrix(F::MFLDLT) = (_check_factor_lease(F.lease); F.factors)
+factor_status(F::MFLDLT) = F.info
+factor_matrix(F::MFLDLT) = F.factors
 
 function _prepare_ldlt_metadata!(
     ::Type{MF},
@@ -32,11 +30,10 @@ function _prepare_ldlt_metadata!(
             zeros(UInt8, count),
             block_capacity > 0 ?
                 Matrix{MF}(undef, count, block_capacity + 1) : nothing,
-            nothing,
         )
     end
 
-    lease = _acquire_factor_workspace!(workspace, count, block_capacity)
+    _acquire_factor_workspace!(workspace, count, block_capacity)
     dsub = @view workspace.ldlt_dsub[1:count]
     pivots = @view workspace.ldlt_pivots[1:count]
     blocks = @view workspace.ldlt_blocks[1:count]
@@ -50,9 +47,13 @@ function _prepare_ldlt_metadata!(
         pivots,
         blocks,
         workspace.ldlt_weighted,
-        lease,
     )
 end
+
+@inline _owned_ldlt_metadata(dsub, pivots, blocks, ::Nothing) =
+    (dsub, pivots, blocks)
+@inline _owned_ldlt_metadata(dsub, pivots, blocks, ::MFWorkspace) =
+    (copy(dsub), copy(pivots), copy(blocks))
 
 function _mirror_lower_to_upper!(A::AbstractMatrix)
     rows = axes(A, 1)
@@ -553,9 +554,9 @@ On return, the strict lower triangle stores unit-lower `L`, the diagonal stores
 the diagonal of `D`, and `F.dsub[k]` stores the off-diagonal of a 2x2 `D`
 block starting at `k`.
 
-With `workspace=MFWorkspace(T)`, metadata and the blocked weighted panel are
-borrowed from caller-owned storage until that workspace starts another
-factorization.
+With `workspace=MFWorkspace(T)`, metadata and blocked-panel scratch are reused
+during factorization. The returned factor owns the metadata required by solve
+and diagnostics.
 """
 function ldlt!(
     A::AbstractMatrix{MF};
@@ -567,30 +568,31 @@ function ldlt!(
     n == m || throw(DimensionMismatch("ldlt! requires a square matrix"))
     _check_supported(MF)
     Base.require_one_based_indexing(A)
-    _mirror_lower_to_upper!(A)
     if !_lower_triangle_finite(A)
         check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))
-        dsub, pivots, blocks, _, lease = _prepare_ldlt_metadata!(
+        dsub, pivots, blocks, _ = _prepare_ldlt_metadata!(
             MF, n, 0, workspace,
         )
+        owned_dsub, owned_pivots, owned_blocks =
+            _owned_ldlt_metadata(dsub, pivots, blocks, workspace)
         return MFLDLT{
-            MF,typeof(A),typeof(dsub),typeof(pivots),typeof(blocks),
+            MF,typeof(A),typeof(owned_dsub),typeof(owned_pivots),typeof(owned_blocks),
         }(
             A,
-            dsub,
-            pivots,
-            blocks,
+            owned_dsub,
+            owned_pivots,
+            owned_blocks,
             -1,
             zero(MF),
-            lease,
         )
     end
+    _mirror_lower_to_upper!(A)
 
     original_maximum = _lower_maximum_abs(A)
     plan = ldlt_plan(MF, n, config)
     block_capacity = plan.strategy === :blocked ? plan.block_size : 0
 
-    dsub, pivots, blocks, weighted_storage, lease = _prepare_ldlt_metadata!(
+    dsub, pivots, blocks, weighted_storage = _prepare_ldlt_metadata!(
         MF, n, block_capacity, workspace,
     )
     alpha = (one(MF) + sqrt(MF(17))) / MF(8)
@@ -612,9 +614,11 @@ function ldlt!(
     if !iszero(info) && check
         throw(LinearAlgebra.SingularException(info))
     end
+    owned_dsub, owned_pivots, owned_blocks =
+        _owned_ldlt_metadata(dsub, pivots, blocks, workspace)
     return MFLDLT{
-        MF,typeof(A),typeof(dsub),typeof(pivots),typeof(blocks),
+        MF,typeof(A),typeof(owned_dsub),typeof(owned_pivots),typeof(owned_blocks),
     }(
-        A, dsub, pivots, blocks, info, original_maximum, lease,
+        A, owned_dsub, owned_pivots, owned_blocks, info, original_maximum,
     )
 end

@@ -491,3 +491,29 @@ function residual_mixed!(
     end
     return R
 end
+
+function residual_mixed!(
+    r::AbstractVector{<:MultiFloat},
+    A::AbstractMatrix{<:MultiFloat},
+    x::AbstractVector{<:MultiFloat},
+    b::AbstractVector{<:MultiFloat};
+    uplo::Symbol=:general,
+    config::KernelConfig=KernelConfig(),
+)
+    throw(ArgumentError(
+        "residual_mixed! requires A, x, and b to have one exact source MultiFloat type",
+    ))
+end
+
+function residual_mixed!(
+    R::AbstractMatrix{<:MultiFloat},
+    A::AbstractMatrix{<:MultiFloat},
+    X::AbstractMatrix{<:MultiFloat},
+    B::AbstractMatrix{<:MultiFloat};
+    uplo::Symbol=:general,
+    config::KernelConfig=KernelConfig(),
+)
+    throw(ArgumentError(
+        "residual_mixed! requires A, X, and B to have one exact source MultiFloat type",
+    ))
+end

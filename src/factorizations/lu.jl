@@ -7,13 +7,11 @@ struct MFLU{
     ipiv::P
     info::Int
     original_maximum::MF
-    lease::Union{Nothing,_FactorWorkspaceLease{MF}}
 end
 
 factor_kind(::MFLU) = :lu
-@inline _check_factor_valid(F::MFLU) = _check_factor_lease(F.lease)
-factor_status(F::MFLU) = (_check_factor_lease(F.lease); F.info)
-factor_matrix(F::MFLU) = (_check_factor_lease(F.lease); F.factors)
+factor_status(F::MFLU) = F.info
+factor_matrix(F::MFLU) = F.factors
 
 function _prepare_lu_metadata!(
     ::Type{MF},
@@ -21,14 +19,17 @@ function _prepare_lu_metadata!(
     workspace::Union{Nothing,MFWorkspace{MF}},
 ) where {MF<:MultiFloat}
     if workspace === nothing
-        return collect(1:count), nothing
+        return collect(1:count)
     end
-    lease = _acquire_factor_workspace!(workspace, count)
+    _acquire_factor_workspace!(workspace, count)
     @inbounds for index in 1:count
         workspace.lu_pivots[index] = index
     end
-    return @view(workspace.lu_pivots[1:count]), lease
+    return @view(workspace.lu_pivots[1:count])
 end
+
+@inline _owned_lu_pivots(ipiv, ::Nothing) = ipiv
+@inline _owned_lu_pivots(ipiv, ::MFWorkspace) = copy(ipiv)
 
 @inline function _swap_rows!(
     A::AbstractMatrix,
@@ -121,8 +122,8 @@ kernel and the O(n^3) trailing update is delegated to the SIMD/threaded
 
 The factorization stores unit-lower `L` below the diagonal and `U` on/above
 the diagonal. `ipiv` records the row swap performed at each pivot. With
-`workspace=MFWorkspace(T)`, the returned factor borrows pivot metadata until
-the workspace starts another factorization.
+`workspace=MFWorkspace(T)`, pivot workspace is reused during factorization and
+the returned factor owns its pivot metadata.
 """
 function lu!(
     A::AbstractMatrix{MF};
@@ -136,13 +137,14 @@ function lu!(
     kmax = min(m, n)
     if !_all_finite(A)
         check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))
-        ipiv, lease = _prepare_lu_metadata!(MF, kmax, workspace)
-        return MFLU{MF,typeof(A),typeof(ipiv)}(
-            A, ipiv, -1, zero(MF), lease,
+        ipiv = _prepare_lu_metadata!(MF, kmax, workspace)
+        owned_ipiv = _owned_lu_pivots(ipiv, workspace)
+        return MFLU{MF,typeof(A),typeof(owned_ipiv)}(
+            A, owned_ipiv, -1, zero(MF),
         )
     end
     original_maximum = _maximum_abs(A)
-    ipiv, lease = _prepare_lu_metadata!(MF, kmax, workspace)
+    ipiv = _prepare_lu_metadata!(MF, kmax, workspace)
     info = 0
     block = max(config.lu_block, 1)
 
@@ -151,8 +153,9 @@ function lu!(
         info = _factor_lu_panel!(A, first, last, ipiv)
         if !iszero(info)
             check && throw(LinearAlgebra.SingularException(info))
-            return MFLU{MF,typeof(A),typeof(ipiv)}(
-                A, ipiv, info, original_maximum, lease,
+            owned_ipiv = _owned_lu_pivots(ipiv, workspace)
+            return MFLU{MF,typeof(A),typeof(owned_ipiv)}(
+                A, owned_ipiv, info, original_maximum,
             )
         end
 
@@ -185,7 +188,8 @@ function lu!(
         end
     end
 
-    return MFLU{MF,typeof(A),typeof(ipiv)}(
-        A, ipiv, 0, original_maximum, lease,
+    owned_ipiv = _owned_lu_pivots(ipiv, workspace)
+    return MFLU{MF,typeof(A),typeof(owned_ipiv)}(
+        A, owned_ipiv, 0, original_maximum,
     )
 end

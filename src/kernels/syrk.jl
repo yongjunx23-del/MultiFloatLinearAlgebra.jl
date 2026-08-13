@@ -21,12 +21,16 @@ function _syrk_column!(
             )
             accumulator = _structured_mulacc(accumulator, values, V4(panel[k, column]))
         end
-        result = V4(alpha) * accumulator + V4(beta) * V4(
-            output[row, column],
-            output[row + 1, column],
-            output[row + 2, column],
-            output[row + 3, column],
-        )
+        result = if iszero(beta)
+            V4(alpha) * accumulator
+        else
+            V4(alpha) * accumulator + V4(beta) * V4(
+                output[row, column],
+                output[row + 1, column],
+                output[row + 2, column],
+                output[row + 3, column],
+            )
+        end
         for lane in 1:4
             output[row + lane - 1, column] = result[lane]
         end
@@ -38,7 +42,7 @@ function _syrk_column!(
         for k in 1:reduction
             accumulator += panel[k, row] * panel[k, column]
         end
-        output[row, column] =
+        output[row, column] = iszero(beta) ? alpha * accumulator :
             alpha * accumulator + beta * output[row, column]
         row += 1
     end
@@ -47,7 +51,7 @@ end
 
 """
     syrk!(C, panel, alpha=one(eltype(panel)), beta=zero(eltype(panel));
-          config=KernelConfig())
+          uplo=:lower, config=KernelConfig())
 
 Update only the lower triangle:
 
@@ -55,16 +59,21 @@ Update only the lower triangle:
 
 Every output column is independently owned by one task. Within a column,
 four lower-triangle entries are evaluated in MultiFloat SIMD lanes while
-preserving the ascending reduction order in every lane. `C` must not alias
-`panel`.
+preserving the ascending reduction order in every lane. `uplo=:lower` (or
+`:L`) makes this storage contract explicit; other values are rejected. The
+upper triangle is neither read nor written. `C` must not alias `panel`.
+When `beta == 0`, the authoritative lower destination is not read.
 """
 function syrk!(
     output::AbstractMatrix{MF},
     panel::AbstractMatrix{MF},
     alpha::MF=one(MF),
     beta::MF=zero(MF);
+    uplo::Symbol=:lower,
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
+    uplo in (:lower, :L) ||
+        throw(ArgumentError("syrk! currently supports only uplo=:lower or :L"))
     columns = size(panel, 2)
     size(output) == (columns, columns) ||
         throw(DimensionMismatch("syrk! output dimensions differ"))

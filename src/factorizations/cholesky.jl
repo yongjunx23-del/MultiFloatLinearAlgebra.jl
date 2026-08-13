@@ -98,6 +98,7 @@ function cholesky!(
                 panel,
                 -one(MF),
                 one(MF);
+                uplo=:lower,
                 config=config,
             )
         end

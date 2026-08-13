@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       dimension:
-        description: Dense system dimension
+        description: Dense system dimension, comma-separated dimensions, or default
         required: true
-        default: "96"
+        default: "16,32,64,96,128,192,256,384,512"
       samples:
         description: Median sample count
         required: true

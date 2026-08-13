@@ -334,6 +334,10 @@ function main()
 
     println("MFLA caller-owned workspace cycle allocation audit")
     println(
+        "Workspace-backed factors own metadata snapshots; factor rows include " *
+        "that intentional per-factor allocation.",
+    )
+    println(
         "Julia $(VERSION), Julia threads=$(Threads.nthreads()), " *
         "BLAS threads=1, n=$n, nrhs=$right_hand_sides",
     )

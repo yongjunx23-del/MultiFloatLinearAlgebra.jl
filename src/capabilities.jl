@@ -12,8 +12,8 @@ residual output types are accepted. Unsupported limb counts return
 continue to fail explicitly rather than selecting a fallback.
 """
 function capabilities(
-    ::Type{MultiFloat{Float64,N}},
-) where {N}
+    ::Type{MF},
+) where {N,MF<:MultiFloat{Float64,N}}
     supported = 1 <= N <= 4
     mixed_residual_targets = (
         x2=false,
@@ -21,7 +21,17 @@ function capabilities(
         x4=supported && N in (2, 3),
     )
     mixed_precision_residual = any(values(mixed_residual_targets))
+    mixed_residual_target_types = if supported && N == 2
+        (MultiFloat{Float64,3}, MultiFloat{Float64,4})
+    elseif supported && N == 3
+        (MultiFloat{Float64,4},)
+    else
+        ()
+    end
     return (
+        provider=:mfla,
+        scalar_type=MF,
+        base_type=Float64,
         supported=supported,
         limb_count=N,
         dot=supported,
@@ -47,8 +57,14 @@ function capabilities(
         residual=supported,
         mixed_precision_residual=mixed_precision_residual,
         mixed_residual_targets=mixed_residual_targets,
+        mixed_residual_target_types=mixed_residual_target_types,
         refinement_correction=supported,
         reusable_workspace=supported,
+        factor_metadata_ownership=:factor_owned,
+        shared_gemm_workspace_concurrency=:serialized_safe,
+        concurrent_factor_workspace=false,
+        syrk_authoritative_triangle=:lower,
+        syrk_inactive_triangle=:preserved,
         threading=supported,
     )
 end

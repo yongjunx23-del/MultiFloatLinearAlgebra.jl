@@ -678,7 +678,7 @@ include("adversarial.jl")
                 original = copy(Aspd)
                 F = MultiFloatLinearAlgebra.cholesky!(Aspd; config=config)
                 @test MultiFloatLinearAlgebra.issuccess(F)
-                L = Matrix(LowerTriangular(F.factors))
+                L = Matrix(LowerTriangular(factor_matrix(F)))
                 reconstructed = L * transpose(L)
                 @test max_relative_error(reconstructed, original) <=
                     tolerance(T, 8n)
@@ -730,7 +730,7 @@ include("adversarial.jl")
                 original = copy(Aind)
                 F = MultiFloatLinearAlgebra.ldlt!(Aind)
                 @test MultiFloatLinearAlgebra.issuccess(F)
-                @test any(==(UInt8(2)), F.blocks)
+                @test any(==(UInt8(2)), factor_diagnostics(F).blocks)
 
                 rhs = T.(randn(nld))
                 rhs_original = copy(rhs)
@@ -761,7 +761,7 @@ include("adversarial.jl")
                 original = copy(Aind)
                 F = MultiFloatLinearAlgebra.ldlt!(Aind)
                 @test MultiFloatLinearAlgebra.issuccess(F)
-                @test any(==(UInt8(1)), F.blocks)
+                @test any(==(UInt8(1)), factor_diagnostics(F).blocks)
                 rhs = T.(randn(n))
                 rhs_original = copy(rhs)
                 solution = MultiFloatLinearAlgebra.solve(F, rhs; config=config)
@@ -825,7 +825,9 @@ include("adversarial.jl")
                     config=crossing_config,
                 )
                 @test MultiFloatLinearAlgebra.issuccess(crossing_factor)
-                @test count(==(UInt8(2)), crossing_factor.blocks) == crossing_n ÷ 2
+                @test count(
+                    ==(UInt8(2)), factor_diagnostics(crossing_factor).blocks,
+                ) == crossing_n ÷ 2
                 crossing_rhs = T.(randn(crossing_n))
                 crossing_solution = MultiFloatLinearAlgebra.solve(
                     crossing_factor,
@@ -850,7 +852,7 @@ include("adversarial.jl")
                 Alu[1, 1] = T(NaN)
                 Flu = MultiFloatLinearAlgebra.lu!(Alu; check=false, config=config)
                 @test !MultiFloatLinearAlgebra.issuccess(Flu)
-                @test Flu.info == -1
+                @test factor_status(Flu) == -1
 
                 Alu = copy(Anan)
                 Alu[1, 1] = T(Inf)
@@ -865,7 +867,7 @@ include("adversarial.jl")
                 Aspd[2, 2] = T(NaN)
                 Fc = MultiFloatLinearAlgebra.cholesky!(Aspd; check=false, config=config)
                 @test !MultiFloatLinearAlgebra.issuccess(Fc)
-                @test Fc.info == -1
+                @test factor_status(Fc) == -1
 
                 Rind = randn(n, n)
                 Sind = Rind + transpose(Rind)
@@ -879,7 +881,7 @@ include("adversarial.jl")
                 Aind[1, 1] = T(NaN)
                 Fld = MultiFloatLinearAlgebra.ldlt!(Aind; check=false, config=config)
                 @test !MultiFloatLinearAlgebra.issuccess(Fld)
-                @test Fld.info == -1
+                @test factor_status(Fld) == -1
             end
 
             @testset "alpha/beta kernels" begin
@@ -904,7 +906,7 @@ include("adversarial.jl")
                 Ssing[2, 2] = T(1)
                 Flu = MultiFloatLinearAlgebra.lu!(copy(Ssing); check=false, config=config)
                 @test !MultiFloatLinearAlgebra.issuccess(Flu)
-                @test Flu.info >= 1
+                @test factor_status(Flu) >= 1
                 @test_throws LinearAlgebra.SingularException MultiFloatLinearAlgebra.lu!(
                     copy(Ssing); check=true, config=config,
                 )
@@ -912,7 +914,7 @@ include("adversarial.jl")
                 Aindef = T.([1 2; 2 1])
                 Fc = MultiFloatLinearAlgebra.cholesky!(copy(Aindef); check=false, config=config)
                 @test !MultiFloatLinearAlgebra.issuccess(Fc)
-                @test Fc.info >= 1
+                @test factor_status(Fc) >= 1
             end
 
             @testset "single-thread path" begin
@@ -975,6 +977,15 @@ include("adversarial.jl")
                     Fc, reshape(copy(b), n, 1); config=config,
                 )
                 @test xv == vec(xm)
+                xout = fill(T(17), n)
+                @test MultiFloatLinearAlgebra.ldiv!(
+                    xout, Fc, b; config=config,
+                ) === xout
+                @test xout == xv
+                Bout = hcat(b, T(2) .* b)
+                Xout = similar(Bout)
+                MultiFloatLinearAlgebra.ldiv!(Xout, Fc, Bout; config=config)
+                @test Xout == solve(Fc, Bout; config=config)
 
                 Alu = T.(randn(n, n))
                 for i in 1:n
@@ -986,6 +997,9 @@ include("adversarial.jl")
                     Flu, reshape(copy(b), n, 1); config=config,
                 )
                 @test yv == vec(ym)
+                yout = similar(b)
+                MultiFloatLinearAlgebra.ldiv!(yout, Flu, b; config=config)
+                @test yout == yv
 
                 Rind = randn(n, n)
                 Sind = Rind + transpose(Rind)
@@ -999,6 +1013,27 @@ include("adversarial.jl")
                     Fld, reshape(copy(b), n, 1); config=config,
                 )
                 @test zv == vec(zm)
+                zout = similar(b)
+                MultiFloatLinearAlgebra.ldiv!(zout, Fld, b; config=config)
+                @test zout == zv
+
+                failed = MultiFloatLinearAlgebra.lu!(
+                    zeros(T, n, n); check=false, config=config,
+                )
+                untouched = fill(T(23), n)
+                source = copy(b)
+                @test_throws LinearAlgebra.SingularException MultiFloatLinearAlgebra.ldiv!(
+                    untouched, failed, source; config=config,
+                )
+                @test untouched == fill(T(23), n)
+                @test source == b
+
+                factor_column = view(factor_matrix(Flu), :, 1)
+                factor_before = copy(factor_matrix(Flu))
+                @test_throws ArgumentError MultiFloatLinearAlgebra.ldiv!(
+                    factor_column, Flu, b; config=config,
+                )
+                @test factor_matrix(Flu) == factor_before
             end
 
             @testset "factor public protocol" begin
@@ -1008,7 +1043,10 @@ include("adversarial.jl")
                 @test Fc isa MultiFloatLinearAlgebra.AbstractMFFactorization
                 @test MultiFloatLinearAlgebra.factor_kind(Fc) === :cholesky
                 @test MultiFloatLinearAlgebra.factor_status(Fc) == 0
-                @test MultiFloatLinearAlgebra.factor_matrix(Fc) === Fc.factors
+                @test MultiFloatLinearAlgebra.factor_matrix(Fc) isa AbstractMatrix{T}
+                @test factor_state(Fc) === :success
+                @test factor_precision(Fc) === T
+                @test factor_provider(Fc) === :mfla
                 @test size(Fc) == (n, n)
                 @test size(Fc, 1) == n
                 @test size(Fc, 2) == n
@@ -1020,6 +1058,9 @@ include("adversarial.jl")
                 end
                 Flu = MultiFloatLinearAlgebra.lu!(Alu; config=config)
                 @test MultiFloatLinearAlgebra.factor_kind(Flu) === :lu
+                @test factor_state(Flu) === :success
+                @test factor_precision(Flu) === T
+                @test factor_provider(Flu) === :mfla
                 @test size(Flu) == (n, n)
 
                 Rind = randn(n, n)
@@ -1030,7 +1071,126 @@ include("adversarial.jl")
                 Fld = MultiFloatLinearAlgebra.ldlt!(T.(Matrix(Sind)); config=config)
                 @test MultiFloatLinearAlgebra.factor_kind(Fld) === :ldlt
                 @test MultiFloatLinearAlgebra.factor_status(Fld) == 0
+                @test factor_state(Fld) === :success
+                @test factor_precision(Fld) === T
+                @test factor_provider(Fld) === :mfla
                 @test eltype(Fld) === T
+
+                Fqr = rrqr!(T.(randn(n + 2, n)))
+                @test factor_kind(Fqr) === :qr
+                @test factor_state(Fqr) === :success
+                @test factor_precision(Fqr) === T
+                @test factor_provider(Fqr) === :mfla
+
+                qr_matrix = T.(randn(n, n))
+                for index in 1:n
+                    qr_matrix[index, index] += T(4)
+                end
+                Fqr_square = rrqr!(copy(qr_matrix))
+                qr_truth = T.(randn(n))
+                qr_rhs = qr_matrix * qr_truth
+                qr_solution = similar(qr_rhs)
+                MultiFloatLinearAlgebra.ldiv!(
+                    qr_solution, Fqr_square, qr_rhs; config=config,
+                )
+                @test max_relative_error(qr_solution, qr_truth) <=
+                    tolerance(T, 128n)
+
+                qr_inplace = copy(qr_rhs)
+                MultiFloatLinearAlgebra.ldiv!(
+                    qr_inplace, Fqr_square; config=config,
+                )
+                @test max_relative_error(qr_inplace, qr_truth) <=
+                    tolerance(T, 128n)
+
+                qr_truth_matrix = T.(randn(n, 3))
+                qr_rhs_matrix = qr_matrix * qr_truth_matrix
+                qr_solution_matrix = similar(qr_rhs_matrix)
+                MultiFloatLinearAlgebra.ldiv!(
+                    qr_solution_matrix,
+                    Fqr_square,
+                    qr_rhs_matrix;
+                    config=config,
+                )
+                @test max_relative_error(
+                    qr_solution_matrix, qr_truth_matrix,
+                ) <= tolerance(T, 128n)
+
+                qr_inplace_matrix = copy(qr_rhs_matrix)
+                MultiFloatLinearAlgebra.ldiv!(
+                    qr_inplace_matrix, Fqr_square; config=config,
+                )
+                @test max_relative_error(
+                    qr_inplace_matrix, qr_truth_matrix,
+                ) <= tolerance(T, 128n)
+
+                qr_factor_source = view(factor_matrix(Fqr_square), :, 1)
+                qr_factor_source_expected = solve(
+                    Fqr_square, copy(qr_factor_source); config=config,
+                )
+                qr_factor_source_solution = similar(qr_factor_source)
+                MultiFloatLinearAlgebra.ldiv!(
+                    qr_factor_source_solution,
+                    Fqr_square,
+                    qr_factor_source;
+                    config=config,
+                )
+                @test qr_factor_source_solution == qr_factor_source_expected
+
+                qr_factor_before = copy(factor_matrix(Fqr_square))
+                @test_throws ArgumentError MultiFloatLinearAlgebra.ldiv!(
+                    view(factor_matrix(Fqr_square), :, 1),
+                    Fqr_square,
+                    qr_rhs;
+                    config=config,
+                )
+                @test factor_matrix(Fqr_square) == qr_factor_before
+
+                qr_overlap = T.(randn(n + 1))
+                qr_overlap_before = copy(qr_overlap)
+                @test_throws ArgumentError MultiFloatLinearAlgebra.ldiv!(
+                    view(qr_overlap, 2:(n + 1)),
+                    Fqr_square,
+                    view(qr_overlap, 1:n);
+                    config=config,
+                )
+                @test qr_overlap == qr_overlap_before
+                @test_throws DimensionMismatch MultiFloatLinearAlgebra.ldiv!(
+                    zeros(T, n + 2), Fqr, zeros(T, n + 2); config=config,
+                )
+
+                cycle_permutation = [2, 3, 1, 4, 6, 5]
+                cycle_matrix = zeros(T, 6, 6)
+                for (rank, column) in enumerate(cycle_permutation)
+                    cycle_matrix[column, column] = T(7 - rank)
+                end
+                Fqr_cycles = rrqr!(copy(cycle_matrix))
+                @test factor_permutation(Fqr_cycles) == cycle_permutation
+                cycle_truth = T.(1:6)
+                cycle_rhs = cycle_matrix * cycle_truth
+                MultiFloatLinearAlgebra.ldiv!(
+                    cycle_rhs, Fqr_cycles; config=config,
+                )
+                @test max_relative_error(cycle_rhs, cycle_truth) <=
+                    tolerance(T, 128)
+
+                qr_rank_deficient = copy(qr_matrix)
+                qr_rank_deficient[:, end] .= zero(T)
+                Fqr_rank_deficient = rrqr!(qr_rank_deficient)
+                qr_untouched = fill(T(29), n)
+                @test_throws LinearAlgebra.SingularException MultiFloatLinearAlgebra.ldiv!(
+                    qr_untouched, Fqr_rank_deficient, qr_rhs; config=config,
+                )
+                @test qr_untouched == fill(T(29), n)
+
+                qr_nonfinite = fill(T(NaN), n, n)
+                Fqr_nonfinite = rrqr!(qr_nonfinite; check=false)
+                @test factor_state(Fqr_nonfinite) === :nonfinite_input
+                qr_failed_untouched = fill(T(31), n)
+                @test_throws ArgumentError MultiFloatLinearAlgebra.ldiv!(
+                    qr_failed_untouched, Fqr_nonfinite, qr_rhs; config=config,
+                )
+                @test qr_failed_untouched == fill(T(31), n)
             end
 
             @testset "factor diagnostics" begin
@@ -1043,6 +1203,9 @@ include("adversarial.jl")
                 @test dc.kind === :cholesky
                 @test dc.success
                 @test dc.status == 0
+                @test dc.state === :success
+                @test dc.precision === T
+                @test dc.provider === :mfla
                 @test dc.failure_location === nothing
                 @test dc.accepted_pivots == n
                 @test dc.minimum_diagonal > zero(T)
@@ -1056,6 +1219,7 @@ include("adversarial.jl")
                 )
                 dc_fail = factor_diagnostics(Fc_fail)
                 @test !dc_fail.success
+                @test dc_fail.state === :not_posdef
                 @test dc_fail.failure_location == 2
                 @test dc_fail.accepted_pivots == 1
 
@@ -1074,7 +1238,7 @@ include("adversarial.jl")
                 @test du.pivot_growth == du.maximum_u / du.original_maximum
                 @test du.finite
                 du.pivots[1] = 0
-                @test Flu.ipiv[1] != 0
+                @test factor_diagnostics(Flu).pivots[1] != 0
 
                 singular_lu = zeros(T, 4, 4)
                 singular_lu[1, 1] = one(T)
@@ -1083,6 +1247,7 @@ include("adversarial.jl")
                 )
                 du_fail = factor_diagnostics(Flu_fail)
                 @test !du_fail.success
+                @test du_fail.state === :singular
                 @test du_fail.failure_location == 2
                 @test du_fail.accepted_pivots == 1
 
@@ -1109,8 +1274,8 @@ include("adversarial.jl")
                 @test dd.finite
                 dd.pivots[1] = 0
                 dd.blocks[1] = 0
-                @test Fld.pivots[1] != 0
-                @test Fld.blocks[1] == UInt8(2)
+                @test factor_diagnostics(Fld).pivots[1] != 0
+                @test factor_diagnostics(Fld).blocks[1] == UInt8(2)
 
                 # QR rank is reported only at the explicit threshold supplied
                 # to factor_diagnostics; the stored factor remains unchanged.
@@ -1121,12 +1286,13 @@ include("adversarial.jl")
                 dq_threshold = factor_diagnostics(Fqr; rtol=sqrt(eps(T)))
                 @test dq_exact.kind === :qr
                 @test dq_exact.success
+                @test dq_exact.state === :success
                 @test dq_threshold.rank_at_threshold == 4
                 @test dq_threshold.rtol == sqrt(eps(T))
                 @test dq_threshold.rdiag == factor_rdiag(Fqr)
                 dq_threshold.permutation[1] = 0
                 dq_threshold.rdiag[1] = zero(T)
-                @test Fqr.permutation[1] != 0
+                @test factor_permutation(Fqr)[1] != 0
                 @test factor_rdiag(Fqr)[1] != zero(T)
             end
 
@@ -1513,6 +1679,15 @@ include("adversarial.jl")
         @test_throws ArgumentError residual_mixed!(
             zeros(Float64x2, 4), A3, x3, b3,
         )
+        A4 = Float64x4.(A2)
+        x4 = Float64x4.(x2)
+        b4 = Float64x4.(b2)
+        @test_throws ArgumentError residual_mixed!(
+            zeros(MultiFloat{Float64,5}, 4), A4, x4, b4,
+        )
+        @test_throws ArgumentError residual_mixed!(
+            zeros(Float64x4, 4), A2, x3, b2,
+        )
         @test_throws DimensionMismatch residual_mixed!(
             zeros(Float64x4, 3), A2, x2, b2,
         )
@@ -1742,26 +1917,22 @@ include("adversarial.jl")
                     factor_permutation(qr_owned)
                 @test factor_rdiag(qr_borrowed) == factor_rdiag(qr_owned)
 
-                # Reusing factor metadata invalidates the previous borrowed
-                # factor before any solve or diagnostic can read stale data.
-                stale = qr_borrowed
+                # Every returned factor owns its required metadata. Reusing
+                # the same workspace leaves all live factors valid.
+                live_qr = qr_borrowed
+                live_lu = lu_borrowed
                 replacement = MultiFloatLinearAlgebra.lu!(
                     copy(lu_source); config=lu_config, workspace=workspace,
                 )
                 @test MultiFloatLinearAlgebra.issuccess(replacement)
-                @test factor_kind(stale) === :qr
-                @test_throws ArgumentError MultiFloatLinearAlgebra.issuccess(stale)
-                @test_throws ArgumentError factor_status(stale)
-                @test_throws ArgumentError factor_matrix(stale)
-                @test_throws ArgumentError size(stale)
-                @test_throws ArgumentError factor_diagnostics(stale)
-                @test_throws ArgumentError factor_permutation(stale)
-                @test_throws ArgumentError apply_q!(
-                    zeros(T, size(qr_source, 1)), stale,
-                )
+                @test factor_kind(live_qr) === :qr
+                @test MultiFloatLinearAlgebra.issuccess(live_qr)
+                @test factor_status(live_qr) == 0
+                @test factor_permutation(live_qr) == factor_permutation(qr_owned)
+                @test solve(live_lu, lu_rhs; config=lu_config) ==
+                    solve(lu_owned, lu_rhs; config=lu_config)
 
-                # GEMM-only growth leaves a live factor valid. Factor-capacity
-                # growth explicitly invalidates it because views may move.
+                # GEMM and factor-capacity growth also leave live factors valid.
                 ensure_workspace_capacity!(
                     workspace;
                     gemm_workers=2,
@@ -1771,9 +1942,12 @@ include("adversarial.jl")
                 ensure_workspace_capacity!(
                     workspace; factor_capacity=n + 5,
                 )
-                @test_throws ArgumentError MultiFloatLinearAlgebra.issuccess(
-                    replacement,
-                )
+                @test MultiFloatLinearAlgebra.issuccess(replacement)
+                @test MultiFloatLinearAlgebra.issuccess(live_qr)
+                @test MultiFloatLinearAlgebra.issuccess(live_lu)
+                @test factor_diagnostics(live_qr).success
+                @test solve(live_lu, lu_rhs; config=lu_config) ==
+                    solve(lu_owned, lu_rhs; config=lu_config)
                 @test workspace_capacity(workspace).factor == n + 5
 
                 nonfinite = fill(T(NaN), 4, 4)
@@ -1785,12 +1959,17 @@ include("adversarial.jl")
                     copy(nonfinite); check=true, workspace=workspace,
                 )
                 @test factor_status(failed) == -1
+                @test factor_state(failed) === :nonfinite_input
+                @test factor_diagnostics(failed).state === :nonfinite_input
             end
         end
     end
 
     @testset "machine-readable capabilities" begin
         expected_properties = (
+            :provider,
+            :scalar_type,
+            :base_type,
             :supported,
             :limb_count,
             :dot,
@@ -1816,13 +1995,24 @@ include("adversarial.jl")
             :residual,
             :mixed_precision_residual,
             :mixed_residual_targets,
+            :mixed_residual_target_types,
             :refinement_correction,
             :reusable_workspace,
+            :factor_metadata_ownership,
+            :shared_gemm_workspace_concurrency,
+            :concurrent_factor_workspace,
+            :syrk_authoritative_triangle,
+            :syrk_inactive_triangle,
             :threading,
         )
         operation_properties = filter(
-            property -> !(property in (:supported, :limb_count,
-                                       :mixed_residual_targets)),
+            property -> !(property in (
+                :provider, :scalar_type, :base_type, :supported, :limb_count,
+                :mixed_residual_targets, :mixed_residual_target_types,
+                :factor_metadata_ownership, :shared_gemm_workspace_concurrency,
+                :concurrent_factor_workspace, :syrk_authoritative_triangle,
+                :syrk_inactive_triangle,
+            )),
             expected_properties,
         )
 
@@ -1832,6 +2022,9 @@ include("adversarial.jl")
             second_query = capabilities(T)
             @test first_query == second_query
             @test propertynames(first_query) == expected_properties
+            @test first_query.provider === :mfla
+            @test first_query.scalar_type === T
+            @test first_query.base_type === Float64
             @test first_query.supported
             @test first_query.limb_count == limbs
             @test all(getproperty(first_query, property) isa Bool
@@ -1842,6 +2035,14 @@ include("adversarial.jl")
                 x4=limbs in (2, 3),
             )
             @test first_query.mixed_precision_residual == (limbs in (2, 3))
+            expected_target_types = limbs == 2 ? (Float64x3, Float64x4) :
+                limbs == 3 ? (Float64x4,) : ()
+            @test first_query.mixed_residual_target_types == expected_target_types
+            @test first_query.factor_metadata_ownership === :factor_owned
+            @test first_query.shared_gemm_workspace_concurrency === :serialized_safe
+            @test !first_query.concurrent_factor_workspace
+            @test first_query.syrk_authoritative_triangle === :lower
+            @test first_query.syrk_inactive_triangle === :preserved
             for property in operation_properties
                 property === :mixed_precision_residual && continue
                 @test getproperty(first_query, property)
@@ -1855,6 +2056,7 @@ include("adversarial.jl")
         @test unsupported.mixed_residual_targets == (
             x2=false, x3=false, x4=false,
         )
+        @test unsupported.mixed_residual_target_types == ()
         @test all(!getproperty(unsupported, property)
                   for property in operation_properties)
         @test_throws ArgumentError gemm_plan(
@@ -1862,6 +2064,52 @@ include("adversarial.jl")
         )
         @test_throws ArgumentError MFWorkspace(Unsupported)
         @test_throws MethodError capabilities(Float64)
+    end
+
+    @testset "shared packed GEMM workspace concurrency" begin
+        for T in (Float64x2, Float64x3, Float64x4)
+            rows, reduction, columns = 33, 29, 31
+            A1 = T.(randn(rows, reduction))
+            B1 = T.(randn(reduction, columns))
+            A2 = T.(randn(rows + 2, reduction + 4))
+            B2 = T.(randn(reduction + 4, columns + 2))
+            reference1 = zeros(T, rows, columns)
+            reference2 = zeros(T, rows + 2, columns + 2)
+            direct = KernelConfig(thread_count=1, gemm_strategy=:direct)
+            packed = KernelConfig(
+                thread_count=min(2, Threads.nthreads()),
+                gemm_strategy=:packed,
+                gemm_panel_columns=7,
+                gemm_micro_columns=2,
+            )
+            gemm!(reference1, A1, B1; config=direct)
+            gemm!(reference2, A2, B2; config=direct)
+
+            shared = GemmWorkspace(T; thread_count=1, capacity=0)
+            for _ in 1:4
+                output1 = zeros(T, rows, columns)
+                output2 = zeros(T, rows + 2, columns + 2)
+                ready = Channel{Nothing}(2)
+                start = Base.Event()
+                task1 = Threads.@spawn begin
+                    put!(ready, nothing)
+                    wait(start)
+                    gemm!(output1, A1, B1; config=packed, workspace=shared)
+                end
+                task2 = Threads.@spawn begin
+                    put!(ready, nothing)
+                    wait(start)
+                    gemm!(output2, A2, B2; config=packed, workspace=shared)
+                end
+                take!(ready)
+                take!(ready)
+                notify(start)
+                fetch(task1)
+                fetch(task2)
+                @test limb_bitwise_equal(output1, reference1)
+                @test limb_bitwise_equal(output2, reference2)
+            end
+        end
     end
 
     @testset "structured mulacc policy" begin

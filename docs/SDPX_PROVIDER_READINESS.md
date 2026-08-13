@@ -39,7 +39,7 @@ machine-readable query.
 | General/symmetric residual (`src/kernels/mixed_precision_kkt.jl` residual paths) | `residual!` with `r=b-A*x` | General multi-RHS may reuse GEMM workspace; output caller-owned | Authoritative triangle | Dense primitive complete. |
 | Explicit promoted residual | `residual_mixed!` for x2->x3/x4 and x3->x4 | Output caller-owned | Exact supported pairs in `capabilities` | Dense primitive complete. SDPX chooses whether and when to request it. |
 | Backward error and one correction | `normwise_backward_error`, `refinement_correction!` | Output caller-owned | Overflow-safe normwise fact | MFLA performs exactly one requested correction. SDPX owns stopping, stagnation, repetition, acceptance, and certification. |
-| Repeated factor/solve cycle | `MFWorkspace`, `workspace_capacity`, `ensure_workspace_capacity!` | LU/LDLT/RRQR metadata and packed/weighted panels | Stale borrowed factors fail explicitly | Adapter must allocate one workspace per concurrently live borrowed factor. |
+| Repeated factor/solve cycle | `MFWorkspace`, `workspace_capacity`, `ensure_workspace_capacity!` | Reusable factorization scratch and packed/weighted panels; returned factor metadata is owned | Live factors survive workspace reuse and growth | One workspace may serve sequential factorizations with multiple live factors; concurrent factorization calls use distinct workspaces. |
 | Capability selection | `capabilities(T)` | None | Immutable operation facts | SDPX may inspect these facts, but chooses provider and records fallback reason. |
 
 ## Code that remains in SDPX

@@ -29,14 +29,12 @@ end
     GemmWorkspace(T; thread_count=Threads.nthreads(), capacity=0)
 
 Reusable caller-owned packed-panel buffers. One buffer is reserved for each
-possible compute worker so concurrent output-column owners never share mutable
-packing storage.
+compute worker within a call. Calls that share one workspace are serialized by
+an object-local lock so packing storage is never concurrently overwritten.
 """
 mutable struct GemmWorkspace{MF<:MultiFloat}
     buffers::Vector{Vector{MF}}
-    function GemmWorkspace{MF}(buffers::Vector{Vector{MF}}) where {MF<:MultiFloat}
-        return new{MF}(buffers)
-    end
+    lock::ReentrantLock
 end
 
 function GemmWorkspace(
@@ -50,7 +48,7 @@ function GemmWorkspace(
     @inbounds for worker in 1:workers
         buffers[worker] = Vector{MF}(undef, initial_capacity)
     end
-    return GemmWorkspace{MF}(buffers)
+    return GemmWorkspace{MF}(buffers, ReentrantLock())
 end
 
 """
@@ -62,11 +60,12 @@ contains packed GEMM buffers and metadata/scratch for LU, LDLT, and RRQR.
 Residual and correction arrays are deliberately not stored because their
 mutating APIs already accept caller-owned destinations.
 
-A factor returned by `lu!`, `ldlt!`, or `rrqr!` with `workspace=` borrows its
-metadata from this object. Starting another workspace-backed factorization, or
-growing the factor capacity, invalidates the previous borrowed factor; later
-use of that factor throws an `ArgumentError`. A workspace must not be used by
-concurrent calls. No calibration or process-global state is involved.
+Factorization metadata stored here is transient scratch. A factor returned by
+`lu!`, `ldlt!`, or `rrqr!` owns a snapshot of the metadata it needs, so later
+workspace reuse or growth does not invalidate live factors. Concurrent packed
+GEMM calls may share this workspace; concurrent factorization calls must use
+distinct `MFWorkspace` objects. No calibration or process-global state is
+involved.
 """
 mutable struct MFWorkspace{MF<:MultiFloat}
     gemm::GemmWorkspace{MF}
@@ -79,7 +78,6 @@ mutable struct MFWorkspace{MF<:MultiFloat}
     qr_permutation::Vector{Int}
     factor_capacity::Int
     ldlt_block_capacity::Int
-    factor_generation::UInt
 end
 
 function MFWorkspace(
@@ -110,30 +108,7 @@ function MFWorkspace(
         Vector{Int}(undef, factor_capacity),
         factor_capacity,
         ldlt_block_capacity,
-        zero(UInt),
     )
-end
-
-struct _FactorWorkspaceLease{MF<:MultiFloat}
-    workspace::MFWorkspace{MF}
-    generation::UInt
-end
-
-@inline function _advance_factor_generation!(workspace::MFWorkspace)
-    workspace.factor_generation == typemax(UInt) &&
-        throw(OverflowError("factor workspace generation exhausted"))
-    workspace.factor_generation += one(UInt)
-    return workspace.factor_generation
-end
-
-@inline _check_factor_lease(::Nothing) = nothing
-
-@inline function _check_factor_lease(lease::_FactorWorkspaceLease)
-    lease.generation == lease.workspace.factor_generation ||
-        throw(ArgumentError(
-            "factorization metadata was invalidated by reuse of its MFWorkspace",
-        ))
-    return nothing
 end
 
 """
@@ -143,14 +118,19 @@ Return the currently allocated factor, LDLT-panel, and per-worker GEMM
 capacities. This query is pure and does not grow or otherwise mutate storage.
 """
 function workspace_capacity(workspace::MFWorkspace)
-    gemm_capacity = isempty(workspace.gemm.buffers) ? 0 :
-                    minimum(length, workspace.gemm.buffers)
-    return (
-        factor=workspace.factor_capacity,
-        ldlt_block=workspace.ldlt_block_capacity,
-        gemm_workers=length(workspace.gemm.buffers),
-        gemm_elements_per_worker=gemm_capacity,
-    )
+    lock(workspace.gemm.lock)
+    try
+        gemm_capacity = isempty(workspace.gemm.buffers) ? 0 :
+                        minimum(length, workspace.gemm.buffers)
+        return (
+            factor=workspace.factor_capacity,
+            ldlt_block=workspace.ldlt_block_capacity,
+            gemm_workers=length(workspace.gemm.buffers),
+            gemm_elements_per_worker=gemm_capacity,
+        )
+    finally
+        unlock(workspace.gemm.lock)
+    end
 end
 
 """
@@ -158,9 +138,10 @@ end
                                ldlt_block_capacity=0,
                                gemm_workers=1, gemm_capacity=0)
 
-Grow selected workspace capacities without shrinking existing storage.
-Growing `factor_capacity` invalidates any factor borrowing metadata from this
-workspace. Growing only GEMM or LDLT scratch does not invalidate a factor.
+Grow selected workspace capacities without shrinking existing storage. Live
+factors own their required metadata and remain valid after every growth path.
+Capacity growth must not overlap factorization using the same `MFWorkspace`;
+growth of the packed GEMM subworkspace is internally serialized with its users.
 """
 function ensure_workspace_capacity!(
     workspace::MFWorkspace{MF};
@@ -178,7 +159,6 @@ function ensure_workspace_capacity!(
     factor_grew = new_factor_capacity > workspace.factor_capacity
     block_grew = new_block_capacity > workspace.ldlt_block_capacity
     if factor_grew
-        _advance_factor_generation!(workspace)
         resize!(workspace.lu_pivots, new_factor_capacity)
         resize!(workspace.ldlt_dsub, new_factor_capacity)
         resize!(workspace.ldlt_pivots, new_factor_capacity)
@@ -207,8 +187,7 @@ function _acquire_factor_workspace!(
         factor_capacity=factor_capacity,
         ldlt_block_capacity=ldlt_block_capacity,
     )
-    generation = _advance_factor_generation!(workspace)
-    return _FactorWorkspaceLease{MF}(workspace, generation)
+    return workspace
 end
 
 @inline _gemm_workspace(workspace::GemmWorkspace) = workspace
@@ -324,9 +303,10 @@ end
 Supertype for [`MFCholesky`](@ref), [`MFLU`](@ref), [`MFLDLT`](@ref), and
 [`MFQR`](@ref).
 Callers should interact with a factorization through the public accessors
-`factor_status`, `factor_kind`, `factor_matrix`, `issuccess`, `ldiv!`, and
-`solve` rather than reading its concrete fields, so the internal storage can
-evolve without breaking solver packages.
+`factor_status`, `factor_state`, `factor_kind`, `factor_matrix`,
+`factor_precision`, `factor_provider`, `factor_diagnostics`, `issuccess`,
+`ldiv!`, and `solve` rather than reading its concrete fields, so the internal
+storage can evolve without breaking solver packages.
 """
 abstract type AbstractMFFactorization{MF<:MultiFloat} end
 
@@ -363,18 +343,48 @@ Base.size(F::AbstractMFFactorization, dimension::Integer) =
 
 Base.eltype(::AbstractMFFactorization{MF}) where {MF} = MF
 
+"""
+    factor_precision(F::AbstractMFFactorization) -> Type
+    factor_provider(F::AbstractMFFactorization) -> Symbol
+    factor_state(F::AbstractMFFactorization) -> Symbol
+
+Return the exact scalar type, provider identity, and stable symbolic execution
+state of an opaque factor. `factor_status` retains its integer compatibility
+contract; `factor_state` maps that code to `:success`, `:nonfinite_input`,
+`:not_posdef`, `:singular`, or `:numerical_breakdown`. RRQR rank is a
+caller-threshold diagnostic and is not a factorization failure state.
+"""
+factor_precision(::AbstractMFFactorization{MF}) where {MF} = MF
+factor_provider(::AbstractMFFactorization) = :mfla
+
+function factor_state(F::AbstractMFFactorization)
+    status = factor_status(F)
+    iszero(status) && return :success
+    status == -1 && return :nonfinite_input
+    status < 0 && return :numerical_breakdown
+    kind = factor_kind(F)
+    kind === :cholesky && return :not_posdef
+    kind in (:lu, :ldlt) && return :singular
+    return :numerical_breakdown
+end
+
 function _prepare_gemm_workspace!(
     workspace::GemmWorkspace{MF},
     workers::Int,
     capacity::Int,
 ) where {MF<:MultiFloat}
-    required_workers = max(workers, 1)
-    while length(workspace.buffers) < required_workers
-        push!(workspace.buffers, Vector{MF}(undef, max(capacity, 0)))
-    end
-    @inbounds for worker in 1:required_workers
-        buffer = workspace.buffers[worker]
-        length(buffer) >= capacity || resize!(buffer, capacity)
+    lock(workspace.lock)
+    try
+        required_workers = max(workers, 1)
+        while length(workspace.buffers) < required_workers
+            push!(workspace.buffers, Vector{MF}(undef, max(capacity, 0)))
+        end
+        @inbounds for worker in 1:required_workers
+            buffer = workspace.buffers[worker]
+            length(buffer) >= capacity || resize!(buffer, capacity)
+        end
+    finally
+        unlock(workspace.lock)
     end
     return workspace
 end

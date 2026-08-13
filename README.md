@@ -179,13 +179,13 @@ Fldl = MultiFloatLinearAlgebra.ldlt!(copy(K); config, workspace)
 Fqr = rrqr!(copy(E); workspace)
 ```
 
-LU, LDLT, and RRQR factors created with `workspace=` borrow metadata. Starting
-another workspace-backed factorization, or growing `factor_capacity`, makes
-the previous borrowed factor invalid; public status, solve, diagnostic, and
-factor-access operations then throw explicitly. Use one workspace per live
-borrowed factor when factors must coexist. GEMM-only or LDLT-panel growth does
-not invalidate a live factor. A workspace is caller-owned and must not be used
-by concurrent calls. It never calibrates or mutates process-global state.
+LU, LDLT, and RRQR factors created with `workspace=` own snapshots of the
+metadata needed by solve and diagnostics. Multiple factors may remain live;
+later workspace reuse or growth does not invalidate them. Factorization
+scratch in one `MFWorkspace` is not safe for concurrent factorization calls.
+Packed GEMM calls sharing one `GemmWorkspace` (including the GEMM component of
+an `MFWorkspace`) are safe and serialized by an object-local lock. Separate
+workspaces retain call-level concurrency. No process-global state is involved.
 
 Existing calls without `workspace=` retain independently owned metadata.
 `GemmWorkspace` also remains supported by `gemm!` and `residual!`.
@@ -201,13 +201,16 @@ facts.supported                  # true
 facts.transpose_gemv             # true
 facts.rrqr                       # true
 facts.mixed_residual_targets     # (x2=false, x3=false, x4=true)
+facts.mixed_residual_target_types # (Float64x4,)
+facts.shared_gemm_workspace_concurrency # :serialized_safe
 facts.reusable_workspace         # true
 ```
 
-The fixed keys cover kernels, factorizations, vector/multi-RHS support,
-residual/correction primitives, workspace reuse, and threading. Unsupported
-limb counts report every operation as false; production calls still fail
-explicitly and are never replaced by another algorithm.
+The fixed keys cover the exact scalar type and provider, kernels,
+factorizations, vector/multi-RHS support, residual targets, workspace
+ownership/concurrency, SYRK storage, and threading. Unsupported limb counts
+report every operation as false; production calls still fail explicitly and
+are never replaced by another algorithm.
 
 The final read-only SDPX operation map and provider-readiness conclusion are
 in [`docs/SDPX_PROVIDER_READINESS.md`](docs/SDPX_PROVIDER_READINESS.md).
@@ -254,15 +257,15 @@ A solver adapter can remain thin:
 ```julia
 # SPD system
 factor = MultiFloatLinearAlgebra.cholesky!(matrix; config)
-MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
+MultiFloatLinearAlgebra.ldiv!(solution, factor, rhs; config)
 
 # General dense system
 factor = MultiFloatLinearAlgebra.lu!(matrix; config)
-MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
+MultiFloatLinearAlgebra.ldiv!(solution, factor, rhs; config)
 
 # Symmetric-indefinite KKT system
 factor = MultiFloatLinearAlgebra.ldlt!(matrix; config)
-MultiFloatLinearAlgebra.ldiv!(rhs, factor; config)
+MultiFloatLinearAlgebra.ldiv!(solution, factor, rhs; config)
 ```
 
 The caller remains responsible for choosing the arithmetic type, deciding
@@ -275,6 +278,8 @@ a successful factorization. `numerical_rank(F; atol, rtol)` evaluates only the
 threshold supplied by the caller; its zero defaults mean exact nonzero rank.
 `factor_matrix(F)` remains borrowed compact storage and must not be mutated.
 
+`factor_state`, `factor_precision`, and `factor_provider` provide stable
+symbolic state, exact scalar type, and `:mfla` identity.
 `factor_diagnostics(F)` returns a stable NamedTuple of numerical facts. It
 reports failure locations, factor scales, LU/LDLT growth metrics, LDLT pivot
 counts and inertia, and QR rank at an explicitly supplied threshold. Returned
@@ -328,6 +333,10 @@ The complete environment, A/B tables, KKT residuals, route decisions, and
 reproduction commands are recorded in
 [`benchmark/RESULTS.md`](benchmark/RESULTS.md).
 
+The solver-facing ownership, failure, concurrency, precision, and symmetric
+storage rules are frozen in
+[`docs/SOLVER_BACKEND_CONTRACT.md`](docs/SOLVER_BACKEND_CONTRACT.md).
+
 Ordinary dense benchmark:
 
 ```bash
@@ -347,6 +356,7 @@ julia --project=. benchmark/workspace_cycles.jl 128 4
 julia -t 4 --project=. benchmark/shape_tuning.jl 7
 julia -t 4 --project=. benchmark/structured_x3.jl 7
 julia -t 4 --project=. benchmark/multi_rhs.jl 256 5
+julia -t 4 --project=. benchmark/solver_suite.jl 16,32,64,96,128,192,256,384,512 3 solver-suite.tsv
 ```
 
 ## Roadmap
@@ -382,7 +392,8 @@ replacement. Work is sequenced in three stages.
 - Explicit deterministic mixed residual evaluation for x2-to-x3/x4 and
   x3-to-x4, with authoritative symmetric-triangle support.
 - Caller-owned `MFWorkspace` for packed GEMM, LU/LDLT/RRQR metadata, and LDLT
-  weighted panels, with explicit capacity and stale-factor detection.
+  weighted panels, with explicit capacity, factor-owned metadata snapshots,
+  and safe multiple-live-factor semantics.
 - Pure machine-readable `capabilities(T)` facts, including exact mixed
   residual target types.
 - Aqua type-piracy checking enabled.

@@ -631,32 +631,37 @@ function _gemm_packed!(
                           capacity=plan.packed_elements_per_worker,
                       ) :
                       workspace
-    _prepare_gemm_workspace!(
-        owned_workspace,
-        plan.workers,
-        plan.packed_elements_per_worker,
-    )
-    if plan.workers == 1 || jobs <= 1
-        _gemm_packed_worker!(
-            C, A, B, alpha, beta, plan, owned_workspace, 1, jobs,
-        )
-        return C
-    end
-
-    @sync for worker in 1:plan.workers
-        Threads.@spawn _gemm_packed_worker!(
-            C,
-            A,
-            B,
-            alpha,
-            beta,
-            plan,
+    lock(owned_workspace.lock)
+    try
+        _prepare_gemm_workspace!(
             owned_workspace,
-            worker,
-            jobs,
+            plan.workers,
+            plan.packed_elements_per_worker,
         )
+        if plan.workers == 1 || jobs <= 1
+            _gemm_packed_worker!(
+                C, A, B, alpha, beta, plan, owned_workspace, 1, jobs,
+            )
+            return C
+        end
+
+        @sync for worker in 1:plan.workers
+            Threads.@spawn _gemm_packed_worker!(
+                C,
+                A,
+                B,
+                alpha,
+                beta,
+                plan,
+                owned_workspace,
+                worker,
+                jobs,
+            )
+        end
+        return C
+    finally
+        unlock(owned_workspace.lock)
     end
-    return C
 end
 
 """

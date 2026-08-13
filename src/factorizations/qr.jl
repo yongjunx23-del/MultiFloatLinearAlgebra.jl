@@ -7,14 +7,13 @@ struct MFQR{
     factors::M
     tau::T
     permutation::P
+    permutation_cycle_leaders::Vector{Int}
     info::Int
-    lease::Union{Nothing,_FactorWorkspaceLease{MF}}
 end
 
 factor_kind(::MFQR) = :qr
-@inline _check_factor_valid(F::MFQR) = _check_factor_lease(F.lease)
-factor_status(F::MFQR) = (_check_factor_lease(F.lease); F.info)
-factor_matrix(F::MFQR) = (_check_factor_lease(F.lease); F.factors)
+factor_status(F::MFQR) = F.info
+factor_matrix(F::MFQR) = F.factors
 
 function _prepare_qr_metadata!(
     ::Type{MF},
@@ -23,9 +22,9 @@ function _prepare_qr_metadata!(
     workspace::Union{Nothing,MFWorkspace{MF}},
 ) where {MF<:MultiFloat}
     if workspace === nothing
-        return zeros(MF, reflector_count), collect(1:column_count), nothing
+        return zeros(MF, reflector_count), collect(1:column_count)
     end
-    lease = _acquire_factor_workspace!(
+    _acquire_factor_workspace!(
         workspace, max(reflector_count, column_count),
     )
     tau = @view workspace.qr_tau[1:reflector_count]
@@ -34,7 +33,31 @@ function _prepare_qr_metadata!(
     @inbounds for column in 1:column_count
         permutation[column] = column
     end
-    return tau, permutation, lease
+    return tau, permutation
+end
+
+@inline _owned_qr_metadata(tau, permutation, ::Nothing) = (tau, permutation)
+@inline _owned_qr_metadata(tau, permutation, ::MFWorkspace) =
+    (copy(tau), copy(permutation))
+
+function _qr_permutation_cycle_leaders!(permutation::AbstractVector{Int})
+    leaders = Int[]
+    @inbounds for start in eachindex(permutation)
+        permutation[start] > 0 || continue
+        current = start
+        cycle_length = 0
+        while permutation[current] > 0
+            next = permutation[current]
+            permutation[current] = -next
+            current = next
+            cycle_length += 1
+        end
+        cycle_length > 1 && push!(leaders, start)
+    end
+    @inbounds for index in eachindex(permutation)
+        permutation[index] = -permutation[index]
+    end
+    return leaders
 end
 
 """
@@ -44,7 +67,6 @@ Return the column permutation `p` satisfying `A[:, p] = Q * R`. The returned
 vector is a copy and may be mutated by the caller.
 """
 function factor_permutation(F::MFQR)
-    _check_factor_lease(F.lease)
     return copy(F.permutation)
 end
 
@@ -54,7 +76,6 @@ end
 Return a copy of the signed diagonal of the compactly stored `R` factor.
 """
 function factor_rdiag(F::MFQR{MF}) where {MF<:MultiFloat}
-    _check_factor_lease(F.lease)
     diagonal_count = min(size(F.factors)...)
     diagonal = Vector{MF}(undef, diagonal_count)
     @inbounds for index in 1:diagonal_count
@@ -170,8 +191,9 @@ deficiency is a successful factorization; [`numerical_rank`](@ref) applies a
 caller-supplied threshold after factorization. No fallback or rank policy is
 performed here.
 
-With `workspace=MFWorkspace(T)`, `tau` and the permutation borrow caller-owned
-storage until that workspace starts another factorization.
+With `workspace=MFWorkspace(T)`, temporary metadata storage is reused during
+factorization and the returned factor owns its reflector coefficients and
+permutation.
 """
 function rrqr!(
     A::AbstractMatrix{MF};
@@ -185,13 +207,16 @@ function rrqr!(
     finite_input = _all_finite(A)
     !finite_input && check &&
         throw(DomainError(A, "rrqr!: input matrix contains non-finite entries"))
-    tau, permutation, lease = _prepare_qr_metadata!(
+    tau, permutation = _prepare_qr_metadata!(
         MF, reflector_count, n, workspace,
     )
 
     if !finite_input
-        return MFQR{MF,typeof(A),typeof(tau),typeof(permutation)}(
-            A, tau, permutation, -1, lease,
+        owned_tau, owned_permutation =
+            _owned_qr_metadata(tau, permutation, workspace)
+        cycle_leaders = _qr_permutation_cycle_leaders!(owned_permutation)
+        return MFQR{MF,typeof(A),typeof(owned_tau),typeof(owned_permutation)}(
+            A, owned_tau, owned_permutation, cycle_leaders, -1,
         )
     end
 
@@ -203,8 +228,11 @@ function rrqr!(
         tau[step] = _qr_make_reflector!(A, step)
         _qr_apply_reflector_to_trailing!(A, tau[step], step)
     end
-    return MFQR{MF,typeof(A),typeof(tau),typeof(permutation)}(
-        A, tau, permutation, 0, lease,
+    owned_tau, owned_permutation =
+        _owned_qr_metadata(tau, permutation, workspace)
+    cycle_leaders = _qr_permutation_cycle_leaders!(owned_permutation)
+    return MFQR{MF,typeof(A),typeof(owned_tau),typeof(owned_permutation)}(
+        A, owned_tau, owned_permutation, cycle_leaders, 0,
     )
 end
 

@@ -8,6 +8,7 @@ Random.seed!(0x534f4c564552)
 BLAS.set_num_threads(1)
 
 const SUITE_TYPES = (Float64x2, Float64x3, Float64x4)
+const DEFAULT_SOLVER_SIZES = (16, 32, 64, 96, 128, 192, 256, 384, 512)
 
 type_label(::Type{MultiFloat{Float64,N}}) where {N} = "x$N"
 
@@ -15,6 +16,13 @@ function metric_string(value)
     value === nothing && return "na"
     value isa AbstractFloat && return @sprintf("%.9e", value)
     return replace(string(value), '\t' => ' ', '\n' => ' ')
+end
+
+workspace_metric(::Nothing) = "mode=none"
+workspace_metric(mode::Symbol) = "mode=$(mode)"
+function workspace_metric(capacity::NamedTuple)
+    fields = ("$(name)=$(getproperty(capacity, name))" for name in propertynames(capacity))
+    return join(Iterators.flatten((("mode=mfworkspace",), fields)), ';')
 end
 
 function measurement(function_call, samples)
@@ -27,13 +35,27 @@ function measurement(function_call, samples)
         elapsed[sample] = (time_ns() - start) / 1.0e9
     end
     sort!(elapsed)
+    middle = cld(samples, 2)
+    median_seconds = isodd(samples) ? elapsed[middle] :
+        (elapsed[middle] + elapsed[middle + 1]) / 2
     GC.gc()
-    bytes = @allocated function_call()
+    allocation_sample = @timed function_call()
     return (
-        seconds=elapsed[cld(samples, 2)],
-        allocations=bytes,
+        seconds=median_seconds,
+        allocation_count=Base.gc_alloc_count(allocation_sample.gcstats),
+        allocated_bytes=allocation_sample.bytes,
         peak_rss=Sys.maxrss(),
     )
+end
+
+function inferred_matrix_size(shape)
+    found = match(r"(?:n=)?(\d+)", shape)
+    return found === nothing ? nothing : parse(Int, found.captures[1])
+end
+
+function inferred_nrhs(shape)
+    found = match(r"rhs=(\d+)", shape)
+    return found === nothing ? 0 : parse(Int, found.captures[1])
 end
 
 function emit_row(
@@ -45,7 +67,12 @@ function emit_row(
     shape,
     route,
     measured,
-    workspace="none",
+    workspace=nothing,
+    matrix_size=nothing,
+    nrhs=nothing,
+    provider=:mfla,
+    status=:success,
+    factor_reused=false,
     residual=nothing,
     backward_error=nothing,
     diagnostics="none",
@@ -54,13 +81,19 @@ function emit_row(
         section,
         operation,
         arithmetic,
+        matrix_size === nothing ? inferred_matrix_size(shape) : matrix_size,
+        nrhs === nothing ? inferred_nrhs(shape) : nrhs,
         threads,
         shape,
         route,
+        provider,
+        status,
         measured.seconds,
-        measured.allocations,
+        measured.allocation_count,
+        measured.allocated_bytes,
         measured.peak_rss,
-        workspace,
+        workspace_metric(workspace),
+        factor_reused,
         residual,
         backward_error,
         diagnostics,
@@ -568,20 +601,19 @@ function solve_component_rows(
 )
     T = eltype(matrix)
     n = size(matrix, 1)
+    form_vector_rhs(truth) = uplo === :general ?
+        reference_gemv(matrix, truth) : reference_symv(matrix, truth)
     vector_truth = T.(randn(n))
-    vector_rhs = uplo === :general ?
-        reference_gemv(matrix, vector_truth) :
-        reference_symv(matrix, vector_truth)
+    vector_rhs = form_vector_rhs(vector_truth)
     vector_work = similar(vector_rhs)
     vector_measured = measurement(
-        () -> begin
-            copyto!(vector_work, vector_rhs)
-            MultiFloatLinearAlgebra.ldiv!(vector_work, factor; config=config)
-        end,
+        () -> MultiFloatLinearAlgebra.ldiv!(
+            vector_work, factor, vector_rhs; config=config,
+        ),
         samples,
     )
     vector_quality = quality_gate(
-        "$(label)_vector_solve",
+        "$(label)_rhs1_solve",
         max_relative_error(vector_work, vector_truth),
         T,
         n,
@@ -589,52 +621,61 @@ function solve_component_rows(
     emit_row(
         outputs;
         section="solve",
-        operation="$(label)_predictor",
+        operation="$(label)_factor_reuse",
         arithmetic=type_label(T),
+        matrix_size=n,
+        nrhs=1,
         threads=threads,
         shape="n=$(n),rhs=1",
         route="trsv",
         measured=vector_measured,
+        factor_reused=true,
         residual=vector_quality,
+        diagnostics="state=$(factor_state(factor))",
     )
 
-    matrix_truth = T.(randn(n, 4))
-    matrix_rhs = if uplo === :general
-        reference_gemm(matrix, matrix_truth)
-    else
-        output = zeros(T, n, 4)
-        for column in 1:4
-            output[:, column] .= reference_symv(
-                matrix, view(matrix_truth, :, column),
-            )
+    for rhs_count in (2, 4, 8)
+        truth = T.(randn(n, rhs_count))
+        right_hand_side = if uplo === :general
+            reference_gemm(matrix, truth)
+        else
+            output = zeros(T, n, rhs_count)
+            for column in 1:rhs_count
+                output[:, column] .= reference_symv(
+                    matrix, view(truth, :, column),
+                )
+            end
+            output
         end
-        output
+        work = similar(right_hand_side)
+        measured = measurement(
+            () -> MultiFloatLinearAlgebra.ldiv!(
+                work, factor, right_hand_side; config=config,
+            ),
+            samples,
+        )
+        quality = quality_gate(
+            "$(label)_rhs$(rhs_count)_solve",
+            max_relative_error(work, truth),
+            T,
+            n,
+        )
+        emit_row(
+            outputs;
+            section="solve",
+            operation="$(label)_factor_reuse",
+            arithmetic=type_label(T),
+            matrix_size=n,
+            nrhs=rhs_count,
+            threads=threads,
+            shape="n=$(n),rhs=$(rhs_count)",
+            route="trsm",
+            measured=measured,
+            factor_reused=true,
+            residual=quality,
+            diagnostics="state=$(factor_state(factor))",
+        )
     end
-    matrix_work = similar(matrix_rhs)
-    matrix_measured = measurement(
-        () -> begin
-            copyto!(matrix_work, matrix_rhs)
-            MultiFloatLinearAlgebra.ldiv!(matrix_work, factor; config=config)
-        end,
-        samples,
-    )
-    matrix_quality = quality_gate(
-        "$(label)_matrix_solve",
-        max_relative_error(matrix_work, matrix_truth),
-        T,
-        n,
-    )
-    emit_row(
-        outputs;
-        section="solve",
-        operation="$(label)_corrector",
-        arithmetic=type_label(T),
-        threads=threads,
-        shape="n=$(n),rhs=4",
-        route="trsm",
-        measured=matrix_measured,
-        residual=matrix_quality,
-    )
 
     residual_storage = similar(vector_rhs)
     residual_arguments = uplo === :general ?
@@ -667,6 +708,7 @@ function solve_component_rows(
         route=uplo === :general ? "general" : "lower_authoritative",
         measured=residual_measured,
         backward_error=backward,
+        factor_reused=true,
     )
 
     correction = similar(residual_storage)
@@ -686,6 +728,118 @@ function solve_component_rows(
         route="one_explicit_solve",
         measured=correction_measured,
         backward_error=backward,
+        factor_reused=true,
+    )
+    return nothing
+end
+
+function benchmark_factor_reuse(
+    outputs,
+    label,
+    matrix,
+    factorize!,
+    config,
+    threads,
+    samples;
+    uplo=:general,
+    workspace=nothing,
+)
+    T = eltype(matrix)
+    n = size(matrix, 1)
+    first_truth = T.(randn(n))
+    second_truth = T.(randn(n))
+    form_rhs(truth) = uplo === :general ?
+        reference_gemv(matrix, truth) : reference_symv(matrix, truth)
+    first_rhs = form_rhs(first_truth)
+    second_rhs = form_rhs(second_truth)
+    first_solution = similar(first_rhs)
+    second_solution = similar(second_rhs)
+    once_buffer = similar(matrix)
+    twice_first_buffer = similar(matrix)
+    twice_second_buffer = similar(matrix)
+
+    function factor_once_solve_twice!()
+        copyto!(once_buffer, matrix)
+        factor = factorize!(once_buffer)
+        MultiFloatLinearAlgebra.ldiv!(
+            first_solution, factor, first_rhs; config=config,
+        )
+        MultiFloatLinearAlgebra.ldiv!(
+            second_solution, factor, second_rhs; config=config,
+        )
+        return factor
+    end
+
+    function factor_twice_solve_twice!()
+        copyto!(twice_first_buffer, matrix)
+        first_factor = factorize!(twice_first_buffer)
+        MultiFloatLinearAlgebra.ldiv!(
+            first_solution, first_factor, first_rhs; config=config,
+        )
+        copyto!(twice_second_buffer, matrix)
+        second_factor = factorize!(twice_second_buffer)
+        MultiFloatLinearAlgebra.ldiv!(
+            second_solution, second_factor, second_rhs; config=config,
+        )
+        return second_factor
+    end
+
+    once_measured = measurement(factor_once_solve_twice!, samples)
+    once_factor = factor_once_solve_twice!()
+    once_quality = quality_gate(
+        "$(label)_factor_once_solve_twice",
+        max(
+            max_relative_error(first_solution, first_truth),
+            max_relative_error(second_solution, second_truth),
+        ),
+        T,
+        n,
+    )
+    emit_row(
+        outputs;
+        section="reuse",
+        operation="$(label)_factor_once_solve_twice",
+        arithmetic=type_label(T),
+        matrix_size=n,
+        nrhs=2,
+        threads=threads,
+        shape="n=$(n),rhs=1+1",
+        route="factor_once_trsv_twice",
+        measured=once_measured,
+        workspace=workspace,
+        status=factor_state(once_factor),
+        factor_reused=true,
+        residual=once_quality,
+        diagnostics=diagnostics_summary(factor_diagnostics(once_factor)),
+    )
+
+    twice_measured = measurement(factor_twice_solve_twice!, samples)
+    twice_factor = factor_twice_solve_twice!()
+    twice_quality = quality_gate(
+        "$(label)_factor_twice_solve_twice",
+        max(
+            max_relative_error(first_solution, first_truth),
+            max_relative_error(second_solution, second_truth),
+        ),
+        T,
+        n,
+    )
+    emit_row(
+        outputs;
+        section="reuse",
+        operation="$(label)_factor_twice_solve_twice",
+        arithmetic=type_label(T),
+        matrix_size=n,
+        nrhs=2,
+        threads=threads,
+        shape="n=$(n),rhs=1+1",
+        route="factor_twice_trsv_twice",
+        measured=twice_measured,
+        workspace=workspace,
+        status=factor_state(twice_factor),
+        factor_reused=false,
+        residual=twice_quality,
+        diagnostics=diagnostics_summary(factor_diagnostics(twice_factor)),
     )
     return nothing
 end
@@ -731,6 +885,7 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         shape="$(n)x$(n)",
         route="blocked_lower",
         measured=cholesky_measured,
+        status=factor_state(cholesky_factor),
         diagnostics=diagnostics_summary(cholesky_diagnostics),
     )
     solve_component_rows(
@@ -738,6 +893,16 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         "cholesky",
         spd,
         cholesky_factor,
+        config,
+        threads,
+        samples;
+        uplo=:lower,
+    )
+    benchmark_factor_reuse(
+        outputs,
+        "cholesky",
+        spd,
+        buffer -> MultiFloatLinearAlgebra.cholesky!(buffer; config=config),
         config,
         threads,
         samples;
@@ -764,6 +929,7 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         shape="$(n)x$(n)",
         route="blocked_partial_pivot",
         measured=lu_measured,
+        status=factor_state(lu_factor),
         diagnostics=diagnostics_summary(lu_diagnostics),
     )
     solve_component_rows(
@@ -774,6 +940,25 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         config,
         threads,
         samples,
+    )
+    factor_workspace = MFWorkspace(
+        T;
+        factor_capacity=n,
+        ldlt_block_capacity=max(2, ldlt_plan(T, n, config).block_size),
+        thread_count=threads,
+        gemm_capacity=n * min(24, n),
+    )
+    benchmark_factor_reuse(
+        outputs,
+        "lu",
+        general,
+        buffer -> MultiFloatLinearAlgebra.lu!(
+            buffer; config=config, workspace=factor_workspace,
+        ),
+        config,
+        threads,
+        samples;
+        workspace=workspace_capacity(factor_workspace),
     )
 
     kkt = make_kkt(T, n)
@@ -797,6 +982,7 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         shape="$(n)x$(n)",
         route="$(ldlt_plan_value.strategy)/$(ldlt_plan_value.reason)/block=$(ldlt_plan_value.block_size)",
         measured=ldlt_measured,
+        status=factor_state(ldlt_factor),
         diagnostics=diagnostics_summary(ldlt_diagnostics),
     )
     solve_component_rows(
@@ -808,6 +994,19 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         threads,
         samples;
         uplo=:lower,
+    )
+    benchmark_factor_reuse(
+        outputs,
+        "ldlt",
+        kkt,
+        buffer -> MultiFloatLinearAlgebra.ldlt!(
+            buffer; config=config, workspace=factor_workspace,
+        ),
+        config,
+        threads,
+        samples;
+        uplo=:lower,
+        workspace=workspace_capacity(factor_workspace),
     )
 
     qr_rows = n + 7
@@ -845,6 +1044,7 @@ function benchmark_factors(outputs, ::Type{T}, n, threads, samples) where {T}
         shape="$(qr_rows)x$(qr_columns)",
         route="column_pivoted_householder",
         measured=qr_measured,
+        status=factor_state(qr_factor),
         residual=qr_quality,
         diagnostics=diagnostics_summary(qr_diagnostics),
     )
@@ -1032,7 +1232,7 @@ function benchmark_cycle_route(
     ))
     quality_gate("$(label)_cycle", backward, T, n)
     workspace_description = workspace === nothing ?
-        "owned" : workspace_capacity(workspace)
+        :owned : workspace_capacity(workspace)
     route = label == "ldlt" ? begin
         plan = ldlt_plan(T, n, config)
         "$(plan.strategy)/$(plan.reason)"
@@ -1128,10 +1328,19 @@ function benchmark_cycles(
     return nothing
 end
 
+function parse_sizes(argument)
+    argument == "default" && return collect(DEFAULT_SOLVER_SIZES)
+    sizes = parse.(Int, split(argument, ','))
+    isempty(sizes) && throw(ArgumentError("at least one suite dimension is required"))
+    all(>=(16), sizes) ||
+        throw(ArgumentError("suite dimensions must be at least 16"))
+    return unique(sizes)
+end
+
 function main()
-    n = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 96
+    sizes = length(ARGS) >= 1 ? parse_sizes(ARGS[1]) :
+        collect(DEFAULT_SOLVER_SIZES)
     samples = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 3
-    n >= 16 || throw(ArgumentError("suite dimension must be at least 16"))
     samples >= 1 || throw(ArgumentError("sample count must be positive"))
 
     outputs = IO[stdout]
@@ -1143,14 +1352,20 @@ function main()
     header = join((
         "section",
         "operation",
-        "arithmetic",
+        "scalar_type",
+        "matrix_size",
+        "nrhs",
         "threads",
         "shape",
         "route",
-        "median_seconds",
+        "provider",
+        "status",
+        "median_time_seconds",
+        "allocation_count",
         "allocated_bytes",
         "process_peak_rss_bytes",
         "workspace_capacity",
+        "factor_reused",
         "relative_residual",
         "backward_error",
         "diagnostics",
@@ -1161,19 +1376,23 @@ function main()
             output,
             "# julia=$(VERSION) arch=$(Sys.ARCH) os=$(Sys.KERNEL) " *
             "available_threads=$(Threads.nthreads()) blas_threads=1 " *
-            "n=$n samples=$samples rss=monotonic_process_peak",
+            "sizes=$(join(sizes, ',')) samples=$samples rss=monotonic_process_peak",
         )
         println(output, header)
     end
 
     thread_counts = unique((1, min(4, Threads.nthreads())))
-    for threads in thread_counts
-        for T in SUITE_TYPES
-            # Thread-count comparisons use identical arithmetic inputs for a
-            # given limb count. Timing order may change, but matrix values do not.
-            Random.seed!(0x534f4c564552 + capabilities(T).limb_count)
-            benchmark_kernels(outputs, T, n, threads, samples)
-            benchmark_factors(outputs, T, n, threads, samples)
+    for n in sizes
+        for threads in thread_counts
+            for T in SUITE_TYPES
+                # Thread-count comparisons use identical arithmetic inputs for a
+                # given limb count and size.
+                Random.seed!(
+                    0x534f4c564552 + capabilities(T).limb_count + n,
+                )
+                benchmark_kernels(outputs, T, n, threads, samples)
+                benchmark_factors(outputs, T, n, threads, samples)
+            end
         end
     end
     output_file === nothing || close(output_file)

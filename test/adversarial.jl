@@ -383,7 +383,10 @@ end
             syrk_serial = copy(initial_triangle)
             syrk_parallel = copy(initial_triangle)
             syrk!(syrk_serial, panel, T(-2), T(3); config=serial)
-            syrk!(syrk_parallel, panel, T(-2), T(3); config=parallel)
+            syrk!(
+                syrk_parallel, panel, T(-2), T(3);
+                uplo=:L, config=parallel,
+            )
             @test lower_limb_bitwise_equal(syrk_serial, syrk_parallel)
             @test all(
                 column -> all(
@@ -392,6 +395,49 @@ end
                 ),
                 axes(syrk_serial, 2),
             )
+            @test_throws ArgumentError syrk!(
+                copy(initial_triangle), panel; uplo=:upper,
+            )
+            no_read = fill(T(NaN), size(initial_triangle))
+            no_read_upper = copy(no_read)
+            for column in axes(no_read, 2), row in 1:(column - 1)
+                no_read[row, column] = T(91 + row + column)
+                no_read_upper[row, column] = no_read[row, column]
+            end
+            syrk!(no_read, panel, one(T), zero(T); uplo=:lower, config=serial)
+            no_read_reference = begin
+                reference = zeros(T, size(no_read))
+                for column in axes(reference, 2), row in column:size(reference, 1)
+                    accumulator = zero(T)
+                    for k in axes(panel, 1)
+                        accumulator += panel[k, row] * panel[k, column]
+                    end
+                    reference[row, column] = accumulator
+                end
+                reference
+            end
+            @test lower_limb_bitwise_equal(no_read, no_read_reference)
+            @test all(
+                no_read[row, column] == no_read_upper[row, column]
+                for column in axes(no_read, 2) for row in 1:(column - 1)
+            )
+
+            # Cholesky and its trailing SYRK consume only authoritative lower
+            # storage even when every inactive entry is non-finite garbage.
+            raw_spd = randn(29, 29)
+            clean_spd = T.(Matrix(raw_spd * transpose(raw_spd) + 29I))
+            corrupted_spd = copy(clean_spd)
+            for column in axes(corrupted_spd, 2), row in 1:(column - 1)
+                corrupted_spd[row, column] = isodd(row + column) ? T(NaN) : T(Inf)
+            end
+            rhs_spd = T.(randn(29))
+            factor_spd = MultiFloatLinearAlgebra.cholesky!(
+                corrupted_spd;
+                config=KernelConfig(cholesky_block=5, thread_count=2),
+            )
+            solution_spd = MultiFloatLinearAlgebra.solve(factor_spd, rhs_spd)
+            @test max_relative_error(clean_spd * solution_spd, rhs_spd) <=
+                tolerance(T, 256 * 29)
 
             packed_length = 29 * 30 ÷ 2
             packed_initial = T.(randn(packed_length))

@@ -10,16 +10,27 @@ Dispatch selects the triangular solve for `MFCholesky`, `MFLU`, or `MFLDLT`.
 Vector right-hand sides use the dedicated [`trsv!`](@ref) single-column kernel,
 while matrix right-hand sides use [`trsm!`](@ref).
 """
+@inline function _check_factor_solve_success(F::MFCholesky)
+    issuccess(F) || throw(LinearAlgebra.PosDefException(factor_status(F)))
+    return nothing
+end
+
+@inline function _check_factor_solve_success(F::Union{MFLU,MFLDLT})
+    issuccess(F) || throw(LinearAlgebra.SingularException(factor_status(F)))
+    return nothing
+end
+
 function ldiv!(
     destination::AbstractVector{MF},
     F::MFCholesky{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     n = size(F.factors, 1)
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
 
     trsv!(
         destination,
@@ -45,10 +56,11 @@ function ldiv!(
     F::MFCholesky{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     size(destination, 1) == size(F.factors, 1) ||
         throw(DimensionMismatch("right-hand side dimensions differ"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
     trsm!(
         destination,
         F.factors;
@@ -105,13 +117,14 @@ function ldiv!(
     F::MFLU{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     A = F.factors
     n, m = size(A)
     n == m || throw(DimensionMismatch("solve requires a square LU factor"))
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
     _apply_pivots!(destination, F.ipiv)
 
     trsv!(
@@ -138,12 +151,13 @@ function ldiv!(
     F::MFLU{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     n, m = size(F.factors)
     n == m || throw(DimensionMismatch("solve requires a square LU factor"))
     size(destination, 1) == n ||
         throw(DimensionMismatch("right-hand side dimensions differ"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
     _apply_pivots!(destination, F.ipiv)
     trsm!(
         destination,
@@ -282,11 +296,12 @@ function ldiv!(
     F::MFLDLT{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     n = size(F.factors, 1)
     length(destination) == n ||
         throw(DimensionMismatch("right-hand side length differs"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
     _apply_ldlt_pivots_forward!(destination, F)
 
     trsv!(
@@ -316,10 +331,11 @@ function ldiv!(
     F::MFLDLT{MF};
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
-    issuccess(F) || throw(LinearAlgebra.SingularException(F.info))
+    _check_factor_solve_success(F)
     Base.require_one_based_indexing(destination, F.factors)
     size(destination, 1) == size(F.factors, 1) ||
         throw(DimensionMismatch("right-hand side dimensions differ"))
+    _require_no_output_alias("ldiv!", destination, F.factors)
     _apply_ldlt_pivots_forward!(destination, F)
     trsm!(
         destination,
@@ -345,19 +361,201 @@ function ldiv!(
 end
 
 """
+    ldiv!(x, F, b; config=KernelConfig())
+    ldiv!(X, F, B; config=KernelConfig())
+
+Copy a vector or multi-RHS source into a caller-owned destination, then solve
+with a successful Cholesky, LU, or LDLT factor. All validation occurs before
+the copy, so a failed factor or invalid destination leaves both arrays
+unchanged. Exact source/destination identity is allowed; other overlapping
+views are rejected.
+
+Square, exactly full-rank RRQR factors have a corresponding wrapper below;
+rectangular/rank-selected routes use `apply_q!`, `solve_r!`, and
+`factor_permutation` explicitly.
+"""
+function ldiv!(
+    destination::AbstractVector{MF},
+    F::Union{MFCholesky{MF},MFLU{MF},MFLDLT{MF}},
+    source::AbstractVector{MF};
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    _check_factor_solve_success(F)
+    Base.require_one_based_indexing(destination, source, factor_matrix(F))
+    n = size(F, 1)
+    size(F, 2) == n || throw(DimensionMismatch("solve requires a square factor"))
+    length(destination) == n && length(source) == n ||
+        throw(DimensionMismatch("right-hand side length differs"))
+    _require_no_output_alias("ldiv!", destination, factor_matrix(F))
+    destination === source || begin
+        Base.mightalias(destination, source) &&
+            throw(ArgumentError("ldiv! does not support partially overlapping right-hand sides"))
+        copyto!(destination, source)
+    end
+    return ldiv!(destination, F; config=config)
+end
+
+function ldiv!(
+    destination::AbstractMatrix{MF},
+    F::Union{MFCholesky{MF},MFLU{MF},MFLDLT{MF}},
+    source::AbstractMatrix{MF};
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    _check_factor_solve_success(F)
+    Base.require_one_based_indexing(destination, source, factor_matrix(F))
+    n = size(F, 1)
+    size(F, 2) == n || throw(DimensionMismatch("solve requires a square factor"))
+    size(destination) == size(source) ||
+        throw(DimensionMismatch("source and destination dimensions differ"))
+    size(destination, 1) == n ||
+        throw(DimensionMismatch("right-hand side dimensions differ"))
+    _require_no_output_alias("ldiv!", destination, factor_matrix(F))
+    destination === source || begin
+        Base.mightalias(destination, source) &&
+            throw(ArgumentError("ldiv! does not support partially overlapping right-hand sides"))
+        copyto!(destination, source)
+    end
+    return ldiv!(destination, F; config=config)
+end
+
+function _check_qr_square_solve(F::MFQR, destination)
+    issuccess(F) ||
+        throw(ArgumentError("ldiv! requires a successful QR factorization"))
+    n, m = size(F)
+    n == m || throw(DimensionMismatch(
+        "QR ldiv! is defined only for square factors; use apply_q! and solve_r! for caller-selected rectangular/rank routes",
+    ))
+    size(destination, 1) == n ||
+        throw(DimensionMismatch("right-hand side dimensions differ"))
+    @inbounds for index in 1:n
+        iszero(factor_matrix(F)[index, index]) &&
+            throw(LinearAlgebra.SingularException(index))
+    end
+    return n
+end
+
+function _permute_qr_solution!(
+    destination::AbstractVector,
+    permutation,
+    cycle_leaders,
+)
+    @inbounds for start in cycle_leaders
+        value = destination[start]
+        current = start
+        while true
+            target = permutation[current]
+            if target == start
+                destination[target] = value
+                break
+            end
+            next_value = destination[target]
+            destination[target] = value
+            value = next_value
+            current = target
+        end
+    end
+    return destination
+end
+function _permute_qr_solution!(
+    destination::AbstractMatrix,
+    permutation,
+    cycle_leaders,
+)
+    @inbounds for column in axes(destination, 2), start in cycle_leaders
+        value = destination[start, column]
+        current = start
+        while true
+            target = permutation[current]
+            if target == start
+                destination[target, column] = value
+                break
+            end
+            next_value = destination[target, column]
+            destination[target, column] = value
+            value = next_value
+            current = target
+        end
+    end
+    return destination
+end
+
+"""
+    ldiv!(destination, F::MFQR; config=KernelConfig())
+
+Solve a square, exactly full-rank pivoted-QR system in place. This wrapper
+performs `Q'`, leading-`R`, and column-permutation operations without choosing
+a numerical-rank threshold. Rectangular and caller-selected rank routes must
+use `apply_q!`, `solve_r!`, and `factor_permutation` explicitly.
+"""
+function ldiv!(
+    destination::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    F::MFQR{MF};
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    Base.require_one_based_indexing(destination, factor_matrix(F))
+    n = _check_qr_square_solve(F, destination)
+    _require_no_output_alias("ldiv!", destination, factor_matrix(F))
+    apply_q!(destination, F; trans=:T)
+    solve_r!(destination, F, n; config=config)
+    return _permute_qr_solution!(
+        destination, F.permutation, F.permutation_cycle_leaders,
+    )
+end
+
+function ldiv!(
+    destination::AbstractVector{MF},
+    F::MFQR{MF},
+    source::AbstractVector{MF};
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    Base.require_one_based_indexing(destination, source, factor_matrix(F))
+    n = _check_qr_square_solve(F, destination)
+    length(source) == n ||
+        throw(DimensionMismatch("right-hand side length differs"))
+    _require_no_output_alias("ldiv!", destination, factor_matrix(F))
+    destination === source || begin
+        Base.mightalias(destination, source) &&
+            throw(ArgumentError("ldiv! does not support partially overlapping right-hand sides"))
+        copyto!(destination, source)
+    end
+    return ldiv!(destination, F; config=config)
+end
+
+function ldiv!(
+    destination::AbstractMatrix{MF},
+    F::MFQR{MF},
+    source::AbstractMatrix{MF};
+    config::KernelConfig=KernelConfig(),
+) where {MF<:MultiFloat}
+    Base.require_one_based_indexing(destination, source, factor_matrix(F))
+    n = _check_qr_square_solve(F, destination)
+    size(source) == size(destination) ||
+        throw(DimensionMismatch("source and destination dimensions differ"))
+    size(source, 1) == n ||
+        throw(DimensionMismatch("right-hand side dimensions differ"))
+    _require_no_output_alias("ldiv!", destination, factor_matrix(F))
+    destination === source || begin
+        Base.mightalias(destination, source) &&
+            throw(ArgumentError("ldiv! does not support partially overlapping right-hand sides"))
+        copyto!(destination, source)
+    end
+    return ldiv!(destination, F; config=config)
+end
+
+"""
     solve(F, rhs; config=KernelConfig())
 
 Solve the factorized system `F` for `rhs` and return a new array. This is the
 non-mutating wrapper around `ldiv!` that copies `rhs` first.
 """
 solve(
-    F::Union{MFCholesky,MFLU,MFLDLT},
+    F::Union{MFCholesky,MFLU,MFLDLT,MFQR},
     rhs::AbstractVector;
     config::KernelConfig=KernelConfig(),
 ) = ldiv!(copy(rhs), F; config=config)
 
 solve(
-    F::Union{MFCholesky,MFLU,MFLDLT},
+    F::Union{MFCholesky,MFLU,MFLDLT,MFQR},
     rhs::AbstractMatrix;
     config::KernelConfig=KernelConfig(),
 ) = ldiv!(copy(rhs), F; config=config)

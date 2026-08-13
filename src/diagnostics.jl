@@ -37,7 +37,10 @@ function factor_diagnostics(F::MFCholesky{MF}) where {MF<:MultiFloat}
     return (
         kind=:cholesky,
         status=F.info,
+        state=factor_state(F),
         success=issuccess(F),
+        precision=factor_precision(F),
+        provider=factor_provider(F),
         failure_location=F.info > 0 ? F.info : nothing,
         accepted_pivots=accepted,
         minimum_diagonal=minimum_diagonal,
@@ -57,7 +60,6 @@ function _lu_maximum_u(F::MFLU{MF}) where {MF<:MultiFloat}
 end
 
 function factor_diagnostics(F::MFLU{MF}) where {MF<:MultiFloat}
-    _check_factor_lease(F.lease)
     accepted = F.info > 0 ? F.info - 1 : F.info == 0 ? length(F.ipiv) : 0
     minimum_pivot, maximum_pivot =
         _diagonal_magnitude_range(F.factors, accepted)
@@ -67,7 +69,10 @@ function factor_diagnostics(F::MFLU{MF}) where {MF<:MultiFloat}
     return (
         kind=:lu,
         status=F.info,
+        state=factor_state(F),
         success=issuccess(F),
+        precision=factor_precision(F),
+        provider=factor_provider(F),
         failure_location=F.info > 0 ? F.info : nothing,
         accepted_pivots=accepted,
         pivots=copy(F.ipiv),
@@ -127,7 +132,6 @@ function _ldlt_smallest_abs_eigenvalue(
 end
 
 function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
-    _check_factor_lease(F.lease)
     one_by_one = 0
     two_by_two = 0
     positive = 0
@@ -180,7 +184,10 @@ function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
     return (
         kind=:ldlt,
         status=F.info,
+        state=factor_state(F),
         success=issuccess(F),
+        precision=factor_precision(F),
+        provider=factor_provider(F),
         failure_location=F.info > 0 ? F.info : nothing,
         one_by_one_pivots=one_by_one,
         two_by_two_pivots=two_by_two,
@@ -201,7 +208,6 @@ function factor_diagnostics(
     atol::Real=zero(MF),
     rtol::Real=zero(MF),
 ) where {MF<:MultiFloat}
-    _check_factor_lease(F.lease)
     diagonal = factor_rdiag(F)
     minimum_diagonal = isempty(diagonal) ? nothing : minimum(abs, diagonal)
     maximum_diagonal = isempty(diagonal) ? nothing : maximum(abs, diagonal)
@@ -209,7 +215,10 @@ function factor_diagnostics(
     return (
         kind=:qr,
         status=F.info,
+        state=factor_state(F),
         success=issuccess(F),
+        precision=factor_precision(F),
+        provider=factor_provider(F),
         failure_location=nothing,
         permutation=copy(F.permutation),
         rdiag=diagonal,
