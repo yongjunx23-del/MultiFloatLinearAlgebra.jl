@@ -65,3 +65,11 @@ end
 
 _supports_fused_mulacc(::Type{MultiFloat{Float64,3}}) = true
 _supports_fused_mulacc(::Type{<:MultiFloat}) = false
+
+@inline function _mulacc(acc::MultiFloatVec{4,T,N}, x::MultiFloatVec{4,T,N}, y::MultiFloatVec{4,T,N}) where {T,N}
+    return acc + x * y
+end
+
+@inline function _mulacc(acc::MultiFloatVec{4,Float64,3}, x::MultiFloatVec{4,Float64,3}, y::MultiFloatVec{4,Float64,3})
+    return mulacc_x3(acc, x, y)
+end

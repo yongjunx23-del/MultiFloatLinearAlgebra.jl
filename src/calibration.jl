@@ -160,7 +160,7 @@ function _calibration_seconds(
     for measurement in measurements
         if measurement.size == size &&
            measurement.strategy === strategy &&
-           (strategy === :direct ||
+           (strategy in (:direct, :fused) ||
             (measurement.panel_columns == panel_columns &&
              measurement.micro_columns == micro_columns))
             return measurement.seconds
@@ -174,12 +174,14 @@ end
                    thread_count=Threads.nthreads(), candidates=nothing,
                    minimum_speedup=1.05)
 
-Benchmark the direct route and a deterministic packed-panel candidate set. The
-function returns every measurement plus a `GemmProfile`; it never installs
-global state. Calibration is intentionally explicit and moderately expensive:
-the defaults target the 512/1024 dense regime where panel packing can change
-the memory-traffic balance. Callers working at other scales should pass their
-own representative `sizes`.
+Benchmark the direct-family route and a deterministic packed-panel candidate
+set. The direct-family baseline is the standard direct kernel, except
+Float64x3, which uses the fused `mulacc_x3` kernel. The function returns every
+measurement plus a `GemmProfile`; it never installs global state. Calibration
+is intentionally explicit and moderately expensive: the defaults target the
+512/1024 dense regime where panel packing can change the memory-traffic
+balance. Callers working at other scales should pass their own representative
+`sizes`.
 
 The candidate is chosen by performance at the largest tested size. Packed mode
 is accepted only when that largest point beats direct by `minimum_speedup`, and
@@ -187,9 +189,10 @@ the crossover is the earliest tested size from which every larger tested point
 also clears the same margin. This suffix rule prevents a noisy smaller matrix
 from enabling a route that regresses at the intended production scale.
 
-The direct and packed outputs must also be exactly equal under the package's
+The baseline and packed outputs must also be exactly equal under the package's
 ascending-reduction contract. If no candidate passes both numerical and timing
-gates, the returned profile explicitly selects `:direct`.
+gates, the returned profile keeps `:auto` with an infinite crossover, so the
+type-level direct family remains authoritative.
 """
 function calibrate_gemm(
     ::Type{MF};
@@ -218,6 +221,7 @@ function calibrate_gemm(
 
     measurements = GemmMeasurement[]
     workers = min(max(thread_count, 1), Threads.nthreads())
+    baseline_strategy = _supports_fused_mulacc(MF) ? :fused : :direct
     for n in tested_sizes
         A = _calibration_matrix(MF, n, 0.1)
         B = _calibration_matrix(MF, n, 0.7)
@@ -225,14 +229,14 @@ function calibrate_gemm(
 
         direct_config = KernelConfig(
             thread_count=workers,
-            gemm_strategy=:direct,
+            gemm_strategy=baseline_strategy,
         )
         direct_seconds = _median_elapsed_seconds(samples) do
             gemm!(direct_output, A, B; config=direct_config)
         end
         push!(
             measurements,
-            GemmMeasurement(n, :direct, 0, 0, direct_seconds),
+            GemmMeasurement(n, baseline_strategy, 0, 0, direct_seconds),
         )
 
         for (panel_columns, micro_columns) in candidate_list
@@ -288,7 +292,7 @@ function calibrate_gemm(
 
     function wins_at(size::Int)
         direct_seconds = _calibration_seconds(
-            measurements, size, :direct,
+            measurements, size, baseline_strategy,
         )
         packed_seconds = _calibration_seconds(
             measurements, size, :packed, best_panel, best_micro,

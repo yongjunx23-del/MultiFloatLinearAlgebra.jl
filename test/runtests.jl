@@ -749,6 +749,64 @@ end
             )
             @test plan_direct.strategy === :direct
         end
+
+        @testset "fused gemmt/syrk bitwise equality" begin
+            # GEMMT and SYRK use the same internal `_mulacc` specialization, so
+            # confirm the fused x3 bulk is bitwise identical to the standard
+            # accumulation on full-limb data.
+            for rows in (16, 17), reduction in (8, 11)
+                left = Matrix{T3}(undef, rows, reduction)
+                right = Matrix{T3}(undef, rows, reduction)
+                setprecision(BigFloat, 512) do
+                    for j in 1:reduction, i in 1:rows
+                        left[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                        right[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    end
+                end
+
+                # Fused is the x3 default now, so compare against an explicit
+                # standard reference computed by the same reduction order.
+                Cstd = zeros(T3, rows, rows)
+                Cfus = zeros(T3, rows, rows)
+                for column in 1:rows
+                    for row in column:rows
+                        acc = zero(T3)
+                        for k in 1:reduction
+                            acc += left[row, k] * right[column, k]
+                        end
+                        Cstd[row, column] = acc
+                    end
+                end
+                MultiFloatLinearAlgebra.gemmt!(
+                    Cfus, left, right;
+                    config=KernelConfig(thread_count=1),
+                )
+                @test Cfus == Cstd
+
+                panel = Matrix{T3}(undef, reduction, rows)
+                setprecision(BigFloat, 512) do
+                    for j in 1:rows, i in 1:reduction
+                        panel[i, j] = T3(rich_big(rng, rand(rng, -40:40); sign=rand(rng, Bool) ? 1 : -1))
+                    end
+                end
+                Sstd = zeros(T3, rows, rows)
+                Sfus = zeros(T3, rows, rows)
+                for column in 1:rows
+                    for row in column:rows
+                        acc = zero(T3)
+                        for k in 1:reduction
+                            acc += panel[k, row] * panel[k, column]
+                        end
+                        Sstd[row, column] = acc
+                    end
+                end
+                MultiFloatLinearAlgebra.syrk!(
+                    Sfus, panel;
+                    config=KernelConfig(thread_count=1),
+                )
+                @test Sfus == Sstd
+            end
+        end
     end
 
     @testset "Aqua" begin
