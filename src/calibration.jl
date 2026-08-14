@@ -62,10 +62,10 @@ queryable and reproducible by `gemm_plan`.
 """
 function with_gemm_profile(
     config::KernelConfig,
-    profile::GemmProfile;
+    profile::GemmProfile{MF};
     strict::Bool=true,
     thread_count::Int=profile.thread_count,
-)
+) where {MF}
     if strict && !profile_compatible(profile; thread_count=thread_count)
         throw(ArgumentError(
             "GemmProfile fingerprint does not match the current machine; " *
@@ -85,6 +85,7 @@ function with_gemm_profile(
         gemm_packed_crossover=profile.packed_crossover,
         gemm_panel_columns=profile.panel_columns,
         gemm_micro_columns=profile.micro_columns,
+        gemm_profile_scalar_type=MF,
     )
 end
 

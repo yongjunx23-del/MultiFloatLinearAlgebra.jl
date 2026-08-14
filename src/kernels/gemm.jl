@@ -49,6 +49,13 @@ function gemm_plan(
     config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     _check_supported(MF)
+    if config.gemm_profile_scalar_type !== nothing &&
+       config.gemm_profile_scalar_type !== MF
+        throw(ArgumentError(
+            "GEMM profile for $(config.gemm_profile_scalar_type) cannot be " *
+            "used with $MF",
+        ))
+    end
     strategy = config.gemm_strategy
     strategy in (:auto, :direct, :packed, :fused) ||
         throw(ArgumentError("gemm_strategy must be :auto, :direct, :packed, or :fused"))
@@ -136,7 +143,8 @@ end
     column::Int,
     alpha::MF,
     beta::MF,
-) where {T,N,MF<:MultiFloat{T,N}}
+    ::Val{OVERWRITE},
+) where {T,N,MF<:MultiFloat{T,N},OVERWRITE}
     V4 = MultiFloatVec{4,T,N}
     first_accumulator = zero(V4)
     second_accumulator = zero(V4)
@@ -151,18 +159,26 @@ end
         second_accumulator += values * V4(B[k, column + 1])
     end
 
-    first_result = V4(alpha) * first_accumulator + V4(beta) * V4(
-        C[row, column],
-        C[row + 1, column],
-        C[row + 2, column],
-        C[row + 3, column],
-    )
-    second_result = V4(alpha) * second_accumulator + V4(beta) * V4(
-        C[row, column + 1],
-        C[row + 1, column + 1],
-        C[row + 2, column + 1],
-        C[row + 3, column + 1],
-    )
+    first_result = if OVERWRITE
+        V4(alpha) * first_accumulator
+    else
+        V4(alpha) * first_accumulator + V4(beta) * V4(
+            C[row, column],
+            C[row + 1, column],
+            C[row + 2, column],
+            C[row + 3, column],
+        )
+    end
+    second_result = if OVERWRITE
+        V4(alpha) * second_accumulator
+    else
+        V4(alpha) * second_accumulator + V4(beta) * V4(
+            C[row, column + 1],
+            C[row + 1, column + 1],
+            C[row + 2, column + 1],
+            C[row + 3, column + 1],
+        )
+    end
     @inbounds for lane in 1:4
         C[row + lane - 1, column] = first_result[lane]
         C[row + lane - 1, column + 1] = second_result[lane]
@@ -178,7 +194,8 @@ function _gemm_direct_column_range!(
     beta::MF,
     first_column::Int,
     last_column::Int,
-) where {T,N,MF<:MultiFloat{T,N}}
+    overwrite::Val{OVERWRITE},
+) where {T,N,MF<:MultiFloat{T,N},OVERWRITE}
     m = size(A, 1)
     V4 = MultiFloatVec{4,T,N}
     column = first_column
@@ -186,7 +203,7 @@ function _gemm_direct_column_range!(
     @inbounds while column + 1 <= last_column
         row = 1
         while row + 3 <= m
-            _gemm_store_pair!(C, A, B, row, column, alpha, beta)
+            _gemm_store_pair!(C, A, B, row, column, alpha, beta, overwrite)
             row += 4
         end
         while row <= m
@@ -197,9 +214,9 @@ function _gemm_direct_column_range!(
                 first_accumulator += a * B[k, column]
                 second_accumulator += a * B[k, column + 1]
             end
-            C[row, column] =
+            C[row, column] = OVERWRITE ? alpha * first_accumulator :
                 alpha * first_accumulator + beta * C[row, column]
-            C[row, column + 1] =
+            C[row, column + 1] = OVERWRITE ? alpha * second_accumulator :
                 alpha * second_accumulator + beta * C[row, column + 1]
             row += 1
         end
@@ -219,12 +236,16 @@ function _gemm_direct_column_range!(
                 )
                 accumulator += values * V4(B[k, column])
             end
-            result = V4(alpha) * accumulator + V4(beta) * V4(
-                C[row, column],
-                C[row + 1, column],
-                C[row + 2, column],
-                C[row + 3, column],
-            )
+            result = if OVERWRITE
+                V4(alpha) * accumulator
+            else
+                V4(alpha) * accumulator + V4(beta) * V4(
+                    C[row, column],
+                    C[row + 1, column],
+                    C[row + 2, column],
+                    C[row + 3, column],
+                )
+            end
             for lane in 1:4
                 C[row + lane - 1, column] = result[lane]
             end
@@ -235,7 +256,8 @@ function _gemm_direct_column_range!(
             for k in axes(A, 2)
                 accumulator += A[row, k] * B[k, column]
             end
-            C[row, column] = alpha * accumulator + beta * C[row, column]
+            C[row, column] = OVERWRITE ? alpha * accumulator :
+                alpha * accumulator + beta * C[row, column]
             row += 1
         end
     end
@@ -253,8 +275,9 @@ function _gemm_direct!(
     n = size(B, 2)
     jobs = cld(n, plan.panel_columns)
     workers = plan.workers
+    overwrite = Val(iszero(beta))
     if workers == 1 || jobs <= 1
-        _gemm_direct_column_range!(C, A, B, alpha, beta, 1, n)
+        _gemm_direct_column_range!(C, A, B, alpha, beta, 1, n, overwrite)
         return C
     end
 
@@ -271,6 +294,7 @@ function _gemm_direct!(
                     beta,
                     first_column,
                     last_column,
+                    overwrite,
                 )
             end
         end
@@ -290,7 +314,8 @@ end
     column::Int,
     alpha::MultiFloat{Float64,3},
     beta::MultiFloat{Float64,3},
-)
+    ::Val{OVERWRITE},
+) where {OVERWRITE}
     V3 = MultiFloatVec{4,Float64,3}
     first_accumulator = zero(V3)
     second_accumulator = zero(V3)
@@ -305,18 +330,26 @@ end
         second_accumulator = _gemm_mulacc(second_accumulator, values, V3(B[k, column + 1]))
     end
 
-    first_result = V3(alpha) * first_accumulator + V3(beta) * V3(
-        C[row, column],
-        C[row + 1, column],
-        C[row + 2, column],
-        C[row + 3, column],
-    )
-    second_result = V3(alpha) * second_accumulator + V3(beta) * V3(
-        C[row, column + 1],
-        C[row + 1, column + 1],
-        C[row + 2, column + 1],
-        C[row + 3, column + 1],
-    )
+    first_result = if OVERWRITE
+        V3(alpha) * first_accumulator
+    else
+        V3(alpha) * first_accumulator + V3(beta) * V3(
+            C[row, column],
+            C[row + 1, column],
+            C[row + 2, column],
+            C[row + 3, column],
+        )
+    end
+    second_result = if OVERWRITE
+        V3(alpha) * second_accumulator
+    else
+        V3(alpha) * second_accumulator + V3(beta) * V3(
+            C[row, column + 1],
+            C[row + 1, column + 1],
+            C[row + 2, column + 1],
+            C[row + 3, column + 1],
+        )
+    end
     @inbounds for lane in 1:4
         C[row + lane - 1, column] = first_result[lane]
         C[row + lane - 1, column + 1] = second_result[lane]
@@ -332,7 +365,8 @@ end
     column::Int,
     alpha::MultiFloat{Float64,3},
     beta::MultiFloat{Float64,3},
-)
+    ::Val{OVERWRITE},
+) where {OVERWRITE}
     V3 = MultiFloatVec{4,Float64,3}
     accumulator = zero(V3)
     @inbounds for k in axes(A, 2)
@@ -344,12 +378,16 @@ end
         )
         accumulator = _gemm_mulacc(accumulator, values, V3(B[k, column]))
     end
-    result = V3(alpha) * accumulator + V3(beta) * V3(
-        C[row, column],
-        C[row + 1, column],
-        C[row + 2, column],
-        C[row + 3, column],
-    )
+    result = if OVERWRITE
+        V3(alpha) * accumulator
+    else
+        V3(alpha) * accumulator + V3(beta) * V3(
+            C[row, column],
+            C[row + 1, column],
+            C[row + 2, column],
+            C[row + 3, column],
+        )
+    end
     @inbounds for lane in 1:4
         C[row + lane - 1, column] = result[lane]
     end
@@ -364,7 +402,8 @@ function _gemm_direct_column_range_fused!(
     beta::MultiFloat{Float64,3},
     first_column::Int,
     last_column::Int,
-)
+    overwrite::Val{OVERWRITE},
+) where {OVERWRITE}
     MF3 = MultiFloat{Float64,3}
     m = size(A, 1)
     column = first_column
@@ -372,7 +411,9 @@ function _gemm_direct_column_range_fused!(
     @inbounds while column + 1 <= last_column
         row = 1
         while row + 3 <= m
-            _gemm_store_pair_fused!(C, A, B, row, column, alpha, beta)
+            _gemm_store_pair_fused!(
+                C, A, B, row, column, alpha, beta, overwrite,
+            )
             row += 4
         end
         while row <= m
@@ -383,9 +424,9 @@ function _gemm_direct_column_range_fused!(
                 first_accumulator += a * B[k, column]
                 second_accumulator += a * B[k, column + 1]
             end
-            C[row, column] =
+            C[row, column] = OVERWRITE ? alpha * first_accumulator :
                 alpha * first_accumulator + beta * C[row, column]
-            C[row, column + 1] =
+            C[row, column + 1] = OVERWRITE ? alpha * second_accumulator :
                 alpha * second_accumulator + beta * C[row, column + 1]
             row += 1
         end
@@ -395,7 +436,9 @@ function _gemm_direct_column_range_fused!(
     if column <= last_column
         row = 1
         while row + 3 <= m
-            _gemm_store_single_fused!(C, A, B, row, column, alpha, beta)
+            _gemm_store_single_fused!(
+                C, A, B, row, column, alpha, beta, overwrite,
+            )
             row += 4
         end
         while row <= m
@@ -403,7 +446,8 @@ function _gemm_direct_column_range_fused!(
             for k in axes(A, 2)
                 accumulator += A[row, k] * B[k, column]
             end
-            C[row, column] = alpha * accumulator + beta * C[row, column]
+            C[row, column] = OVERWRITE ? alpha * accumulator :
+                alpha * accumulator + beta * C[row, column]
             row += 1
         end
     end
@@ -421,9 +465,12 @@ function _gemm_direct_fused!(
     n = size(B, 2)
     jobs = cld(n, plan.panel_columns)
     workers = plan.workers
+    overwrite = Val(iszero(beta))
 
     if workers == 1 || jobs <= 1
-        _gemm_direct_column_range_fused!(C, A, B, alpha, beta, 1, n)
+        _gemm_direct_column_range_fused!(
+            C, A, B, alpha, beta, 1, n, overwrite,
+        )
         return C
     end
 
@@ -433,7 +480,7 @@ function _gemm_direct_fused!(
                 first_column = (job - 1) * plan.panel_columns + 1
                 last_column = min(job * plan.panel_columns, n)
                 _gemm_direct_column_range_fused!(
-                    C, A, B, alpha, beta, first_column, last_column,
+                    C, A, B, alpha, beta, first_column, last_column, overwrite,
                 )
             end
         end
@@ -469,7 +516,8 @@ function _packed_gemm_column_group!(
     alpha::MF,
     beta::MF,
     columns::Val{NR},
-) where {MF<:MultiFloat,NR}
+    overwrite::Val{OVERWRITE},
+) where {MF<:MultiFloat,NR,OVERWRITE}
     m = size(A, 1)
     row = 1
     @inbounds while row + 3 <= m
@@ -484,6 +532,7 @@ function _packed_gemm_column_group!(
             alpha,
             beta,
             columns,
+            overwrite,
         )
         row += 4
     end
@@ -499,6 +548,7 @@ function _packed_gemm_column_group!(
             alpha,
             beta,
             columns,
+            overwrite,
         )
         row += 1
     end
@@ -514,7 +564,8 @@ function _packed_gemm_panel_nr!(
     alpha::MF,
     beta::MF,
     ::Val{NR},
-) where {MF<:MultiFloat,NR}
+    overwrite::Val{OVERWRITE},
+) where {MF<:MultiFloat,NR,OVERWRITE}
     local_column = 1
     while local_column + NR - 1 <= width
         _packed_gemm_column_group!(
@@ -527,6 +578,7 @@ function _packed_gemm_panel_nr!(
             alpha,
             beta,
             Val(NR),
+            overwrite,
         )
         local_column += NR
     end
@@ -541,6 +593,7 @@ function _packed_gemm_panel_nr!(
             alpha,
             beta,
             Val(2),
+            overwrite,
         )
         local_column += 2
     end
@@ -555,6 +608,7 @@ function _packed_gemm_panel_nr!(
             alpha,
             beta,
             Val(1),
+            overwrite,
         )
     end
     return C
@@ -569,18 +623,19 @@ function _packed_gemm_panel!(
     alpha::MF,
     beta::MF,
     micro_columns::Int,
-) where {MF<:MultiFloat}
+    overwrite::Val{OVERWRITE},
+) where {MF<:MultiFloat,OVERWRITE}
     if micro_columns == 4
         return _packed_gemm_panel_nr!(
-            C, A, packed_b, first_column, width, alpha, beta, Val(4),
+            C, A, packed_b, first_column, width, alpha, beta, Val(4), overwrite,
         )
     elseif micro_columns == 2
         return _packed_gemm_panel_nr!(
-            C, A, packed_b, first_column, width, alpha, beta, Val(2),
+            C, A, packed_b, first_column, width, alpha, beta, Val(2), overwrite,
         )
     end
     return _packed_gemm_panel_nr!(
-        C, A, packed_b, first_column, width, alpha, beta, Val(1),
+        C, A, packed_b, first_column, width, alpha, beta, Val(1), overwrite,
     )
 end
 
@@ -594,7 +649,8 @@ function _gemm_packed_worker!(
     workspace::GemmWorkspace{MF},
     worker::Int,
     jobs::Int,
-) where {MF<:MultiFloat}
+    overwrite::Val{OVERWRITE},
+) where {MF<:MultiFloat,OVERWRITE}
     buffer = workspace.buffers[worker]
     @inbounds for job in worker:plan.workers:jobs
         first_column = (job - 1) * plan.panel_columns + 1
@@ -609,6 +665,7 @@ function _gemm_packed_worker!(
             alpha,
             beta,
             plan.micro_columns,
+            overwrite,
         )
     end
     return nothing
@@ -633,6 +690,7 @@ function _gemm_packed!(
                       workspace
     lock(owned_workspace.lock)
     try
+        overwrite = Val(iszero(beta))
         _prepare_gemm_workspace!(
             owned_workspace,
             plan.workers,
@@ -641,6 +699,7 @@ function _gemm_packed!(
         if plan.workers == 1 || jobs <= 1
             _gemm_packed_worker!(
                 C, A, B, alpha, beta, plan, owned_workspace, 1, jobs,
+                overwrite,
             )
             return C
         end
@@ -656,6 +715,7 @@ function _gemm_packed!(
                 owned_workspace,
                 worker,
                 jobs,
+                overwrite,
             )
         end
         return C
@@ -680,9 +740,9 @@ allocation.
 The kernel requires one-based indexing and does not support aliasing: `C` must
 not share storage with `A` or `B`.
 
-The reduction reads `C` in the `beta` update; when `beta == 0` the caller is
-still responsible for supplying an initialized `C`, matching the package's
-deterministic reference semantics.
+When `beta == 0`, the destination `C` is not read. Otherwise each output is
+updated as `alpha * product + beta * C` without changing its deterministic
+reduction order.
 """
 function gemm!(
     C::AbstractMatrix{MF},

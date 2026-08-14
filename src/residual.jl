@@ -192,6 +192,9 @@ function _backward_error_value(
         (matrix_norm / primary_scale) *
         (solution_norm / solution_scale) +
         (right_hand_side_norm / primary_scale) / solution_scale
+    if iszero(scaled_denominator)
+        return iszero(residual_norm) ? zero(MF) : MF(Inf)
+    end
     scaled_residual = (residual_norm / primary_scale) / solution_scale
     return scaled_residual / scaled_denominator
 end

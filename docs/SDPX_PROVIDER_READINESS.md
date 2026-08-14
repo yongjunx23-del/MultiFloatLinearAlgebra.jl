@@ -17,7 +17,12 @@ future adapter review can refresh the evidence.
 MFLA supports `Float64x2`, `Float64x3`, and `Float64x4` for every ordinary
 operation below. The same-type dense surface also supports `Float64x1`, but x1
 is not an SDPX replacement target. `capabilities(T)` is the authoritative pure
-machine-readable query.
+machine-readable query. This Float64-based x1-x4 range is the complete
+production scalar contract; other base types and x5-x8 are unsupported.
+
+Capability facts make factor storage ownership explicit: metadata is
+factor-owned, the factor matrix borrows the destructive input, factorization
+is destructive, and factor solves do not mutate the factor.
 
 ## Provider matrix
 
@@ -25,7 +30,7 @@ machine-readable query.
 |---|---|---|---|---|
 | Dense vector/Frobenius dot (`src/kernels/api.jl:13`, `src/kernels/generic.jl:20`, Schur and threaded reductions) | `mfdot(x, y)` | No scratch required | Caller receives scalar fact | Complete for dense real MultiFloat arrays. COO/CSC traversal stays in SDPX. |
 | Normal and transpose matvec (`src/schur.jl:36`, `src/step.jl:45`, `src/kkt.jl:2140`) | `gemv!(...; trans=:N/:T)` | Caller-owned output | Deterministic route contract | Thin signature/ownership adapter; formulation and matrix layout stay in SDPX. |
-| General dense matrix product (`src/kernels/api.jl:22`, `src/kernels/extended_precision_blas/gemm.jl:9`) | `gemm!`; `gemm_plan`; explicit `GemmProfile` | `GemmWorkspace` or `MFWorkspace` for packed panels | Inspectable strategy/reason and machine-compatible profile | Replace duplicated fixed-MultiFloat GEMM dispatch. SDPX retains mutable BigFloat-owned kernels. |
+| General dense matrix product (`src/kernels/api.jl:22`, `src/kernels/extended_precision_blas/gemm.jl:9`) | `gemm!`; `gemm_plan`; explicit `GemmProfile` | `GemmWorkspace` or `MFWorkspace` for packed panels | Inspectable strategy/reason and machine/type-compatible profile | Replace duplicated fixed-MultiFloat GEMM dispatch. SDPX retains mutable BigFloat-owned kernels. |
 | Symmetric matrix-vector (`src/kkt.jl:2940`) | `symv!(...; uplo=:lower/:upper)` | No numerical scratch | Authoritative triangle and deterministic output ownership | Thin adapter; SDPX retains Schur storage and worker policy. |
 | Dense Gram/lower SYRK (`src/schur.jl:388`, `src/kernels/extended_precision_blas/syrk.jl:308`) | `syrk!` | Caller-owned matrix | Lower-authoritative contract | Replace duplicated fixed-MultiFloat SYRK. SDPX decides dense/sparse route and merging. |
 | Compact packed Gram (`src/schur.jl:854`, `src/kernels/extended_precision_blas/syrk.jl:629`) | `syrk_packed!` with explicit reduction range | Caller-owned packed vector | Deterministic packed layout | Complete for block-local fixed-MultiFloat panels. |

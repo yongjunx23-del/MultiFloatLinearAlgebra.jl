@@ -194,6 +194,89 @@ include("adversarial.jl")
                 @test packed_plan.micro_columns == 4
             end
 
+            @testset "beta-zero GEMM destination semantics" begin
+                rows, reduction, columns = 9, 7, 15
+                beta_A = T.(randn(rows, reduction))
+                beta_B = T.(randn(reduction, columns))
+                for thread_count in unique((1, min(4, Threads.nthreads())))
+                    strategies = T === Float64x3 ?
+                        (:direct, :fused, :packed) : (:direct, :packed)
+                    for strategy in strategies
+                        beta_config = KernelConfig(
+                            thread_count=thread_count,
+                            gemm_strategy=strategy,
+                            gemm_panel_columns=5,
+                            gemm_micro_columns=4,
+                        )
+                        clean = zeros(T, rows, columns)
+                        stale = fill(T(NaN), rows, columns)
+                        workspace = strategy === :packed ? GemmWorkspace(
+                            T;
+                            thread_count=thread_count,
+                            capacity=reduction * 5,
+                        ) : nothing
+                        gemm!(
+                            clean, beta_A, beta_B, T(2), zero(T);
+                            config=beta_config, workspace=workspace,
+                        )
+                        gemm!(
+                            stale, beta_A, beta_B, T(2), zero(T);
+                            config=beta_config, workspace=workspace,
+                        )
+                        @test stale == clean
+                    end
+
+                    initial = T.(randn(rows, columns))
+                    direct_update = copy(initial)
+                    packed_update = copy(initial)
+                    direct_config = KernelConfig(
+                        thread_count=thread_count,
+                        gemm_strategy=:direct,
+                        gemm_panel_columns=5,
+                    )
+                    packed_config = KernelConfig(
+                        thread_count=thread_count,
+                        gemm_strategy=:packed,
+                        gemm_panel_columns=5,
+                        gemm_micro_columns=4,
+                    )
+                    packed_workspace = GemmWorkspace(
+                        T;
+                        thread_count=thread_count,
+                        capacity=reduction * 5,
+                    )
+                    gemm!(
+                        direct_update, beta_A, beta_B, T(2), T(3);
+                        config=direct_config,
+                    )
+                    gemm!(
+                        packed_update, beta_A, beta_B, T(2), T(3);
+                        config=packed_config, workspace=packed_workspace,
+                    )
+                    @test limb_bitwise_equal(packed_update, direct_update)
+
+                    gemmt_rows = 25
+                    left = T.(randn(gemmt_rows, reduction))
+                    right = T.(randn(gemmt_rows, reduction))
+                    clean = fill(T(17), gemmt_rows, gemmt_rows)
+                    stale = copy(clean)
+                    for column in 1:gemmt_rows, row in column:gemmt_rows
+                        clean[row, column] = zero(T)
+                        stale[row, column] = T(NaN)
+                    end
+                    gemmt_config = KernelConfig(thread_count=thread_count)
+                    gemmt!(
+                        clean, left, right, T(2), zero(T);
+                        config=gemmt_config,
+                    )
+                    gemmt!(
+                        stale, left, right, T(2), zero(T);
+                        config=gemmt_config,
+                    )
+                    @test stale == clean
+                end
+            end
+
             @testset "GEMM calibration contract" begin
                 builtin = default_gemm_profile(T; thread_count=2)
                 resolved = with_gemm_profile(config, builtin)
@@ -222,6 +305,10 @@ include("adversarial.jl")
                     config, mismatched; strict=false,
                 )
                 @test forced.gemm_strategy === mismatched.strategy
+                wrong_type = T === Float64x2 ? Float64x4 : Float64x2
+                @test_throws ArgumentError gemm_plan(
+                    wrong_type, 16, 16, 16, resolved,
+                )
 
                 calibration = calibrate_gemm(
                     T;
@@ -1405,6 +1492,26 @@ include("adversarial.jl")
                     zero_matrix, zero_vector, zero_vector, ones(T, 3),
                 ))
 
+                nonzero_matrix = T.([2 0 0; 0 -3 0; 0 0 4])
+                @test iszero(normwise_backward_error(
+                    nonzero_matrix, zero_vector, zero_vector, zero_vector,
+                ))
+                @test isinf(normwise_backward_error(
+                    nonzero_matrix, zero_vector, zero_vector, ones(T, 3),
+                ))
+                zero_solutions = zeros(T, 3, 2)
+                zero_rhs = zeros(T, 3, 2)
+                mixed_residuals = zeros(T, 3, 2)
+                mixed_residuals[2, 2] = one(T)
+                zero_denominator_errors = normwise_backward_error(
+                    nonzero_matrix,
+                    zero_solutions,
+                    zero_rhs,
+                    mixed_residuals,
+                )
+                @test iszero(zero_denominator_errors[1])
+                @test isinf(zero_denominator_errors[2])
+
                 # The exact denominator exceeds Float64 exponent range, but
                 # the scaled backward error is finite and representable.
                 huge_A = fill(T(1e200), 1, 1)
@@ -1999,6 +2106,9 @@ include("adversarial.jl")
             :refinement_correction,
             :reusable_workspace,
             :factor_metadata_ownership,
+            :factor_matrix_ownership,
+            :factorization_destructive,
+            :factor_solve_mutates_factor,
             :shared_gemm_workspace_concurrency,
             :concurrent_factor_workspace,
             :syrk_authoritative_triangle,
@@ -2009,7 +2119,9 @@ include("adversarial.jl")
             property -> !(property in (
                 :provider, :scalar_type, :base_type, :supported, :limb_count,
                 :mixed_residual_targets, :mixed_residual_target_types,
-                :factor_metadata_ownership, :shared_gemm_workspace_concurrency,
+                :factor_metadata_ownership, :factor_matrix_ownership,
+                :factorization_destructive, :factor_solve_mutates_factor,
+                :shared_gemm_workspace_concurrency,
                 :concurrent_factor_workspace, :syrk_authoritative_triangle,
                 :syrk_inactive_triangle,
             )),
@@ -2039,6 +2151,9 @@ include("adversarial.jl")
                 limbs == 3 ? (Float64x4,) : ()
             @test first_query.mixed_residual_target_types == expected_target_types
             @test first_query.factor_metadata_ownership === :factor_owned
+            @test first_query.factor_matrix_ownership === :borrowed_input
+            @test first_query.factorization_destructive
+            @test !first_query.factor_solve_mutates_factor
             @test first_query.shared_gemm_workspace_concurrency === :serialized_safe
             @test !first_query.concurrent_factor_workspace
             @test first_query.syrk_authoritative_triangle === :lower

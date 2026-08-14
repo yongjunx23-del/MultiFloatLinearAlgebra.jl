@@ -34,8 +34,9 @@ The hot kernels map four independent matrix rows or right-hand sides into
 `MultiFloatVec{4,T,N}` lanes. They use MultiFloats.jl's native fixed-width
 arithmetic rather than converting through `BigFloat`.
 
-The package supports one- through four-limb `MultiFloat{T,N}` values. It does
-not claim support for experimental x5-x8 arithmetic.
+The production provider contract is `MultiFloat{Float64,N}` for `N=1:4`.
+Although kernel implementations retain internal generic structure, other base
+types and experimental x5-x8 arithmetic are not benchmarked or supported.
 
 ## Installation
 
@@ -140,6 +141,11 @@ config = with_gemm_profile(KernelConfig(), profile)
 plan = gemm_plan(Float64x2, 1024, 1024, 1024, config)
 ```
 
+A configuration returned by `with_gemm_profile` is bound to the profile's
+exact MultiFloat arithmetic type. `gemm_plan` and `gemm!` reject applying it
+to another arithmetic type instead of silently reusing incompatible
+calibration data. Ordinary `KernelConfig()` and `:auto` behavior are unchanged.
+
 `GemmCalibration` records the complete measurements, selected geometry,
 required minimum speedup, machine fingerprint, and crossover. The candidate
 is selected at the largest tested size and is enabled only over a stable
@@ -202,6 +208,10 @@ facts.transpose_gemv             # true
 facts.rrqr                       # true
 facts.mixed_residual_targets     # (x2=false, x3=false, x4=true)
 facts.mixed_residual_target_types # (Float64x4,)
+facts.factor_metadata_ownership  # :factor_owned
+facts.factor_matrix_ownership    # :borrowed_input
+facts.factorization_destructive  # true
+facts.factor_solve_mutates_factor # false
 facts.shared_gemm_workspace_concurrency # :serialized_safe
 facts.reusable_workspace         # true
 ```

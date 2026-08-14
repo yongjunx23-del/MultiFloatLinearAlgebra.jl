@@ -84,9 +84,25 @@ No process-global mutable numerical workspace is used.
 
 ## Precision and capabilities
 
-`capabilities(T)` is a pure descriptor for the exact scalar type `T`. It
-includes `provider`, `scalar_type`, workspace/concurrency facts, SYRK storage
-facts, and exact `mixed_residual_target_types`.
+The production provider contract is exactly `MultiFloat{Float64,N}` for
+`N=1:4`. Other base types and x5-x8 arithmetic are outside the public support
+range even where internal code remains generic.
+
+`capabilities(T)` is a pure descriptor for the exact Float64-based MultiFloat
+type `T`. It includes `provider`, `scalar_type`, workspace/concurrency facts,
+SYRK storage facts, exact `mixed_residual_target_types`, and these ownership
+facts:
+
+```text
+factor_metadata_ownership = :factor_owned
+factor_matrix_ownership = :borrowed_input
+factorization_destructive = true
+factor_solve_mutates_factor = false
+```
+
+A `KernelConfig` produced by `with_gemm_profile` is tagged with the profile's
+exact arithmetic type. `gemm_plan` and `gemm!` reject use with another type;
+plain configurations and uncalibrated `:auto` routing remain type-neutral.
 
 The only promoted residual pairs are:
 
