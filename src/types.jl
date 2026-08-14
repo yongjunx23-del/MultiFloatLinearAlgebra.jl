@@ -23,6 +23,7 @@ Base.@kwdef struct KernelConfig
     gemm_packed_crossover::Int = typemax(Int)
     gemm_panel_columns::Int = 0
     gemm_micro_columns::Int = 0
+    gemm_profile_scalar_type::Union{Nothing,DataType} = nothing
 end
 
 """

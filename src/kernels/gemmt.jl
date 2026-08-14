@@ -5,7 +5,8 @@ function _gemmt_column!(
     column::Int,
     alpha::MF,
     beta::MF,
-) where {T,N,MF<:MultiFloat{T,N}}
+    ::Val{OVERWRITE},
+) where {T,N,MF<:MultiFloat{T,N},OVERWRITE}
     rows = size(left, 1)
     reduction = size(left, 2)
     V4 = MultiFloatVec{4,T,N}
@@ -22,12 +23,16 @@ function _gemmt_column!(
             )
             accumulator = _structured_mulacc(accumulator, values, V4(right[column, k]))
         end
-        result = V4(alpha) * accumulator + V4(beta) * V4(
-            output[row, column],
-            output[row + 1, column],
-            output[row + 2, column],
-            output[row + 3, column],
-        )
+        result = if OVERWRITE
+            V4(alpha) * accumulator
+        else
+            V4(alpha) * accumulator + V4(beta) * V4(
+                output[row, column],
+                output[row + 1, column],
+                output[row + 2, column],
+                output[row + 3, column],
+            )
+        end
         for lane in 1:4
             output[row + lane - 1, column] = result[lane]
         end
@@ -39,7 +44,7 @@ function _gemmt_column!(
         for k in 1:reduction
             accumulator += left[row, k] * right[column, k]
         end
-        output[row, column] =
+        output[row, column] = OVERWRITE ? alpha * accumulator :
             alpha * accumulator + beta * output[row, column]
         row += 1
     end
@@ -58,7 +63,8 @@ This is the triangular-output GEMM primitive used by blocked LDLT. Callers are
 responsible for ensuring that the mathematical update is symmetric when only
 one triangle is retained. Each task owns complete output columns, and each
 SIMD lane preserves the ascending reduction order. `C` must not alias either
-input matrix.
+input matrix. When `beta == 0`, the authoritative lower destination is not
+read; the inactive upper triangle is always preserved.
 """
 function gemmt!(
     output::AbstractMatrix{MF},
@@ -79,9 +85,12 @@ function gemmt!(
     _require_no_output_alias("gemmt!", output, right)
 
     workers = _workers(config, rows)
+    overwrite = Val(iszero(beta))
     if workers == 1 || rows < 24
         @inbounds for column in 1:rows
-            _gemmt_column!(output, left, right, column, alpha, beta)
+            _gemmt_column!(
+                output, left, right, column, alpha, beta, overwrite,
+            )
         end
         return output
     end
@@ -90,7 +99,7 @@ function gemmt!(
         Threads.@spawn begin
             @inbounds for column in worker:workers:rows
                 _gemmt_column!(
-                    output, left, right, column, alpha, beta,
+                    output, left, right, column, alpha, beta, overwrite,
                 )
             end
         end
