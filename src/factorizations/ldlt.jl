@@ -17,6 +17,89 @@ factor_kind(::MFLDLT) = :ldlt
 factor_status(F::MFLDLT) = F.info
 factor_matrix(F::MFLDLT) = F.factors
 
+"""
+    factor_pivots(F::MFLDLT) -> Vector{Int}
+
+Return a caller-owned copy of the raw Bunch-Kaufman step pivots.
+"""
+factor_pivots(F::MFLDLT) = copy(F.pivots)
+
+"""
+    factor_blocks(F::MFLDLT) -> Vector{UInt8}
+
+Return a caller-owned copy of the LDLT block markers. A block start contains
+`1` or `2`; the continuation of a 2x2 block contains `0`.
+"""
+factor_blocks(F::MFLDLT) = copy(F.blocks)
+
+"""
+    factor_permutation(F::MFLDLT) -> Vector{Int}
+
+Return the final symmetric permutation `p` satisfying
+`A_original[p, p] = L * D * L'`. The returned vector is caller-owned.
+"""
+function factor_permutation(F::MFLDLT)
+    permutation = collect(1:length(F.blocks))
+    k = 1
+    @inbounds while k <= length(F.blocks)
+        block = F.blocks[k]
+        if block == UInt8(1)
+            pivot = F.pivots[k]
+            permutation[k], permutation[pivot] =
+                permutation[pivot], permutation[k]
+            k += 1
+        elseif block == UInt8(2) && k < length(F.blocks)
+            pivot = F.pivots[k]
+            permutation[k + 1], permutation[pivot] =
+                permutation[pivot], permutation[k + 1]
+            k += 2
+        elseif block == UInt8(0)
+            break
+        else
+            throw(ArgumentError("invalid LDLT block structure"))
+        end
+    end
+    return permutation
+end
+
+@inline function _ldlt_solve_2x2(
+    d11::MF,
+    d21::MF,
+    d22::MF,
+    first::MF,
+    second::MF,
+) where {MF<:MultiFloat}
+    scale = max(abs(d11), abs(d21), abs(d22))
+    if iszero(scale) || !isfinite(scale)
+        return (zero(MF), zero(MF), false)
+    end
+
+    a = d11 / scale
+    b = d21 / scale
+    c = d22 / scale
+    r1 = first / scale
+    r2 = second / scale
+    if abs(a) >= abs(b)
+        iszero(a) && return (zero(MF), zero(MF), false)
+        t = b / a
+        u = c - t * b
+        (iszero(u) || !isfinite(u)) &&
+            return (zero(MF), zero(MF), false)
+        x2 = (r2 - t * r1) / u
+        x1 = (r1 - b * x2) / a
+        return (x1, x2, true)
+    end
+
+    iszero(b) && return (zero(MF), zero(MF), false)
+    t = a / b
+    u = b - t * c
+    (iszero(u) || !isfinite(u)) &&
+        return (zero(MF), zero(MF), false)
+    x2 = (r1 - t * r2) / u
+    x1 = (r2 - c * x2) / b
+    return (x1, x2, true)
+end
+
 function _prepare_ldlt_metadata!(
     ::Type{MF},
     count::Int,
@@ -301,19 +384,24 @@ function _factor_ldlt_unblocked!(
             d11 = A[k, k]
             d21 = A[k + 1, k]
             d22 = A[k + 1, k + 1]
-            determinant = d11 * d22 - d21 * d21
-            iszero(determinant) && return k
+            dsub[k] = d21
+            _, _, nonsingular = _ldlt_solve_2x2(
+                d11, d21, d22, zero(MF), zero(MF),
+            )
+            nonsingular || return k
 
             @inbounds for row in (k + 2):n
                 first = A[row, k]
                 second = A[row, k + 1]
-                A[row, k] =
-                    (first * d22 - second * d21) / determinant
-                A[row, k + 1] =
-                    (second * d11 - first * d21) / determinant
+                solved_first, solved_second, nonsingular = _ldlt_solve_2x2(
+                    d11, d21, d22, first, second,
+                )
+                nonsingular && isfinite(solved_first) &&
+                    isfinite(solved_second) || return k
+                A[row, k] = solved_first
+                A[row, k + 1] = solved_second
             end
 
-            dsub[k] = d21
             k + 1 < n && _ldlt_rank2_update!(A, k, d11, d21, d22)
             A[k + 1, k] = zero(MF)
             A[k, k + 1] = zero(MF)
@@ -473,11 +561,13 @@ function _factor_ldlt_panel!(
             d22 = _ldlt_panel_entry(
                 A, k + 1, k + 1, panel_first, k, dsub, blocks,
             )
-            determinant = d11 * d22 - d21 * d21
-            iszero(determinant) && return (k, panel_last)
             A[k, k] = d11
             A[k + 1, k + 1] = d22
             dsub[k] = d21
+            _, _, nonsingular = _ldlt_solve_2x2(
+                d11, d21, d22, zero(MF), zero(MF),
+            )
+            nonsingular || return (k, panel_last)
 
             @inbounds for row in (k + 2):n
                 first = _ldlt_panel_entry(
@@ -486,10 +576,13 @@ function _factor_ldlt_panel!(
                 second = _ldlt_panel_entry(
                     A, row, k + 1, panel_first, k, dsub, blocks,
                 )
-                A[row, k] =
-                    (first * d22 - second * d21) / determinant
-                A[row, k + 1] =
-                    (second * d11 - first * d21) / determinant
+                solved_first, solved_second, nonsingular = _ldlt_solve_2x2(
+                    d11, d21, d22, first, second,
+                )
+                nonsingular && isfinite(solved_first) &&
+                    isfinite(solved_second) || return (k, panel_last)
+                A[row, k] = solved_first
+                A[row, k + 1] = solved_second
             end
             A[k + 1, k] = zero(MF)
             A[k, k + 1] = zero(MF)

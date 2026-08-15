@@ -89,6 +89,15 @@ function _qr_column_norm(
     first_row::Int,
     column::Int,
 ) where {MF<:MultiFloat}
+    scale, scaled_sum = _qr_column_norm_state(A, first_row, column)
+    return iszero(scale) ? zero(MF) : scale * sqrt(scaled_sum)
+end
+
+function _qr_column_norm_state(
+    A::AbstractMatrix{MF},
+    first_row::Int,
+    column::Int,
+) where {MF<:MultiFloat}
     scale = zero(MF)
     scaled_sum = one(MF)
     nonzero_seen = false
@@ -109,7 +118,67 @@ function _qr_column_norm(
             end
         end
     end
-    return nonzero_seen ? scale * sqrt(scaled_sum) : zero(MF)
+    return scale, scaled_sum
+end
+
+function _prepare_qr_norm_state(
+    ::Type{MF},
+    column_count::Int,
+    workspace::Union{Nothing,MFWorkspace{MF}},
+) where {MF<:MultiFloat}
+    if workspace === nothing
+        return (
+            Vector{MF}(undef, column_count),
+            Vector{MF}(undef, column_count),
+            Vector{Bool}(undef, column_count),
+        )
+    end
+    return (
+        workspace.qr_norm_scale,
+        workspace.qr_norm_sum,
+        workspace.qr_norm_dirty,
+    )
+end
+
+function _qr_initialize_norm_state!(
+    A::AbstractMatrix{MF},
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    dirty::AbstractVector{Bool},
+) where {MF<:MultiFloat}
+    @inbounds for column in axes(A, 2)
+        scale[column], scaled_sum[column] =
+            _qr_column_norm_state(A, 1, column)
+        dirty[column] = false
+    end
+    return nothing
+end
+
+@inline function _qr_norm_from_state(
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    column::Int,
+) where {MF<:MultiFloat}
+    current_scale = scale[column]
+    return iszero(current_scale) ? zero(MF) :
+           current_scale * sqrt(scaled_sum[column])
+end
+
+function _qr_recompute_norm!(
+    A::AbstractMatrix{MF},
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    dirty::AbstractVector{Bool},
+    first_row::Int,
+    column::Int,
+) where {MF<:MultiFloat}
+    current_scale, current_sum =
+        _qr_column_norm_state(A, first_row, column)
+    scale[column] = current_scale
+    scaled_sum[column] = current_sum
+    dirty[column] = false
+    return iszero(current_scale) ? zero(MF) :
+           current_scale * sqrt(current_sum)
 end
 
 function _qr_swap_columns!(A::AbstractMatrix, first::Int, second::Int)
@@ -120,15 +189,27 @@ function _qr_swap_columns!(A::AbstractMatrix, first::Int, second::Int)
     return nothing
 end
 
-function _qr_select_pivot(
+function _qr_select_pivot_hybrid!(
     A::AbstractMatrix{MF},
     permutation::AbstractVector{Int},
     step::Int,
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    dirty::AbstractVector{Bool},
+    margin::MF,
 ) where {MF<:MultiFloat}
     pivot = step
-    pivot_norm = _qr_column_norm(A, step, step)
+    pivot_norm = _qr_recompute_norm!(
+        A, scale, scaled_sum, dirty, step, step,
+    )
     @inbounds for column in (step + 1):size(A, 2)
-        candidate_norm = _qr_column_norm(A, step, column)
+        candidate_norm = _qr_norm_from_state(scale, scaled_sum, column)
+        if dirty[column] || iszero(pivot_norm) ||
+           candidate_norm >= (one(MF) - margin) * pivot_norm
+            candidate_norm = _qr_recompute_norm!(
+                A, scale, scaled_sum, dirty, step, column,
+            )
+        end
         if candidate_norm > pivot_norm ||
            (candidate_norm == pivot_norm &&
             permutation[column] < permutation[pivot])
@@ -137,6 +218,35 @@ function _qr_select_pivot(
         end
     end
     return pivot
+end
+
+function _qr_update_norm_state!(
+    A::AbstractMatrix{MF},
+    tau::MF,
+    step::Int,
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    dirty::AbstractVector{Bool},
+    reliability_floor::MF,
+) where {MF<:MultiFloat}
+    iszero(tau) && return nothing
+    @inbounds for column in (step + 1):size(A, 2)
+        dirty[column] && continue
+        current_scale = scale[column]
+        removed = abs(A[step, column])
+        if iszero(current_scale)
+            dirty[column] = !iszero(removed)
+            continue
+        end
+        ratio = removed / current_scale
+        new_sum = scaled_sum[column] - ratio * ratio
+        if !isfinite(new_sum) || new_sum <= reliability_floor
+            dirty[column] = true
+        else
+            scaled_sum[column] = new_sum
+        end
+    end
+    return nothing
 end
 
 function _qr_make_reflector!(
@@ -185,8 +295,9 @@ The result satisfies `A_original[:, factor_permutation(F)] = Q * R`.
 Householder vectors are stored below the diagonal of `factor_matrix(F)` and
 `R` is stored on and above it.
 
-Column norms are recomputed with scaled sum-of-squares arithmetic at every
-step. Exact pivot-norm ties choose the smallest original column index. Rank
+Column norms use scale-safe downdates, with exact recomputation whenever an
+estimate loses reliability or can compete for the next pivot. Exact pivot-
+norm ties choose the smallest original column index. Rank
 deficiency is a successful factorization; [`numerical_rank`](@ref) applies a
 caller-supplied threshold after factorization. No fallback or rank policy is
 performed here.
@@ -220,13 +331,31 @@ function rrqr!(
         )
     end
 
+    norm_scale, norm_sum, norm_dirty =
+        _prepare_qr_norm_state(MF, n, workspace)
+    _qr_initialize_norm_state!(A, norm_scale, norm_sum, norm_dirty)
+    norm_margin = sqrt(eps(MF))
+    norm_reliability_floor = MF(16) * eps(MF)
+
     @inbounds for step in 1:reflector_count
-        pivot = _qr_select_pivot(A, permutation, step)
+        pivot = _qr_select_pivot_hybrid!(
+            A, permutation, step, norm_scale, norm_sum, norm_dirty,
+            norm_margin,
+        )
         _qr_swap_columns!(A, step, pivot)
         permutation[step], permutation[pivot] =
             permutation[pivot], permutation[step]
+        norm_scale[step], norm_scale[pivot] =
+            norm_scale[pivot], norm_scale[step]
+        norm_sum[step], norm_sum[pivot] = norm_sum[pivot], norm_sum[step]
+        norm_dirty[step], norm_dirty[pivot] =
+            norm_dirty[pivot], norm_dirty[step]
         tau[step] = _qr_make_reflector!(A, step)
         _qr_apply_reflector_to_trailing!(A, tau[step], step)
+        _qr_update_norm_state!(
+            A, tau[step], step, norm_scale, norm_sum, norm_dirty,
+            norm_reliability_floor,
+        )
     end
     owned_tau, owned_permutation =
         _owned_qr_metadata(tau, permutation, workspace)

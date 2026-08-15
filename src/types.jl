@@ -77,6 +77,9 @@ mutable struct MFWorkspace{MF<:MultiFloat}
     ldlt_weighted::Matrix{MF}
     qr_tau::Vector{MF}
     qr_permutation::Vector{Int}
+    qr_norm_scale::Vector{MF}
+    qr_norm_sum::Vector{MF}
+    qr_norm_dirty::Vector{Bool}
     factor_capacity::Int
     ldlt_block_capacity::Int
 end
@@ -107,6 +110,9 @@ function MFWorkspace(
         Matrix{MF}(undef, factor_capacity, weighted_columns),
         Vector{MF}(undef, factor_capacity),
         Vector{Int}(undef, factor_capacity),
+        Vector{MF}(undef, factor_capacity),
+        Vector{MF}(undef, factor_capacity),
+        Vector{Bool}(undef, factor_capacity),
         factor_capacity,
         ldlt_block_capacity,
     )
@@ -166,6 +172,9 @@ function ensure_workspace_capacity!(
         resize!(workspace.ldlt_blocks, new_factor_capacity)
         resize!(workspace.qr_tau, new_factor_capacity)
         resize!(workspace.qr_permutation, new_factor_capacity)
+        resize!(workspace.qr_norm_scale, new_factor_capacity)
+        resize!(workspace.qr_norm_sum, new_factor_capacity)
+        resize!(workspace.qr_norm_dirty, new_factor_capacity)
         workspace.factor_capacity = new_factor_capacity
     end
     if factor_grew || block_grew
@@ -263,6 +272,25 @@ end
 
 @inline _limb_count(::Type{MultiFloat{T,N}}) where {T,N} = N
 
+# Task creation is only worthwhile once a GEMV call contains enough limb-level
+# arithmetic to amortize Julia scheduling. This static threshold was chosen
+# conservatively from x2/x3/x4 crossover measurements; it does not calibrate or
+# branch inside a numerical reduction.
+@inline function _vector_thread_work_worthwhile(
+    ::Type{MF},
+    outputs::Int,
+    reduction::Int,
+) where {MF<:MultiFloat}
+    return outputs * reduction * _limb_count(MF) >= 100_000
+end
+
+@inline function _symv_thread_work_worthwhile(
+    ::Type{MF},
+    dimension::Int,
+) where {MF<:MultiFloat}
+    return dimension >= (_limb_count(MF) == 2 ? 128 : 64)
+end
+
 @inline function _all_finite(A::AbstractArray)
     @inbounds for index in eachindex(A)
         isfinite(A[index]) || return false
@@ -305,9 +333,10 @@ Supertype for [`MFCholesky`](@ref), [`MFLU`](@ref), [`MFLDLT`](@ref), and
 [`MFQR`](@ref).
 Callers should interact with a factorization through the public accessors
 `factor_status`, `factor_state`, `factor_kind`, `factor_matrix`,
-`factor_precision`, `factor_provider`, `factor_diagnostics`, `issuccess`,
-`ldiv!`, and `solve` rather than reading its concrete fields, so the internal
-storage can evolve without breaking solver packages.
+`factor_precision`, `factor_provider`, factor-kind-specific metadata accessors,
+`factor_diagnostics`, `issuccess`, `ldiv!`, and `solve` rather than reading its
+concrete fields, so the internal storage can evolve without breaking solver
+packages.
 """
 abstract type AbstractMFFactorization{MF<:MultiFloat} end
 

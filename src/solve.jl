@@ -251,11 +251,14 @@ function _ldlt_solve_d!(destination::AbstractVector{MF}, F::MFLDLT{MF}) where {M
             d11 = F.factors[k, k]
             d21 = F.dsub[k]
             d22 = F.factors[k + 1, k + 1]
-            determinant = d11 * d22 - d21 * d21
             first = destination[k]
             second = destination[k + 1]
-            destination[k] = (d22 * first - d21 * second) / determinant
-            destination[k + 1] = (d11 * second - d21 * first) / determinant
+            solved_first, solved_second, nonsingular = _ldlt_solve_2x2(
+                d11, d21, d22, first, second,
+            )
+            nonsingular || throw(LinearAlgebra.SingularException(k))
+            destination[k] = solved_first
+            destination[k + 1] = solved_second
             k += 2
         end
     end
@@ -276,14 +279,15 @@ function _ldlt_solve_d!(destination::AbstractMatrix{MF}, F::MFLDLT{MF}) where {M
             d11 = F.factors[k, k]
             d21 = F.dsub[k]
             d22 = F.factors[k + 1, k + 1]
-            determinant = d11 * d22 - d21 * d21
             for column in axes(destination, 2)
                 first = destination[k, column]
                 second = destination[k + 1, column]
-                destination[k, column] =
-                    (d22 * first - d21 * second) / determinant
-                destination[k + 1, column] =
-                    (d11 * second - d21 * first) / determinant
+                solved_first, solved_second, nonsingular = _ldlt_solve_2x2(
+                    d11, d21, d22, first, second,
+                )
+                nonsingular || throw(LinearAlgebra.SingularException(k))
+                destination[k, column] = solved_first
+                destination[k + 1, column] = solved_second
             end
             k += 2
         end

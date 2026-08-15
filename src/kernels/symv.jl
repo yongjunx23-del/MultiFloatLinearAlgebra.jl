@@ -71,7 +71,7 @@ function symv!(
 
     upper = uplo === :upper
     workers = _workers(config, cld(n, 32))
-    if workers == 1 || n < 64
+    if workers == 1 || !_symv_thread_work_worthwhile(MF, n)
         _symv_rows!(y, A, x, alpha, beta, 1, n, upper)
         return y
     end

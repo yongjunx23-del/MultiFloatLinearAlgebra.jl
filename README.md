@@ -159,8 +159,9 @@ the direct route. These are machine results, not portable hard-coded profiles.
 ## Reusable solver workspace
 
 `MFWorkspace` groups only material reusable storage: packed GEMM panels, LU
-pivots, LDLT metadata and weighted panels, and RRQR reflector/permutation
-metadata. Residual and correction arrays remain explicit caller-owned outputs.
+pivots, LDLT metadata and weighted panels, and RRQR reflector/permutation plus
+hybrid norm-state scratch. Residual and correction arrays remain explicit
+caller-owned outputs.
 
 ```julia
 workspace = MFWorkspace(
@@ -287,6 +288,12 @@ For QR, `factor_permutation(F)` returns `p` such that `A[:, p] = Q*R`, and
 a successful factorization. `numerical_rank(F; atol, rtol)` evaluates only the
 threshold supplied by the caller; its zero defaults mean exact nonzero rank.
 `factor_matrix(F)` remains borrowed compact storage and must not be mutated.
+
+For LDLT, `factor_pivots(F)` and `factor_blocks(F)` return copies of the raw
+Bunch-Kaufman metadata, while `factor_permutation(F)` returns `p` such that
+`A_original[p, p] = L*D*L'`. `factor_inertia(F)` reports the inertia by scanning
+only D's 1x1 and 2x2 blocks, avoiding the comprehensive O(n^2) finite-factor
+scan in `factor_diagnostics` when a solver needs only this structural fact.
 
 `factor_state`, `factor_precision`, and `factor_provider` provide stable
 symbolic state, exact scalar type, and `:mfla` identity.

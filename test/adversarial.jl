@@ -267,6 +267,45 @@ end
                 scaled_factor, scaled_rhs; config=single,
             ) == scaled_truth
 
+            # Direct det(D) products overflow or underflow for these finite
+            # pivots. Factorization and both RHS solve shapes share the same
+            # scale-aware 2x2 elimination.
+            for strategy in (:unblocked, :blocked), exponent in (-600, 600)
+                coupling = T(ldexp(1.0, exponent))
+                extreme = zeros(T, 4, 4)
+                for first in (1, 3)
+                    extreme[first + 1, first] = coupling
+                    extreme[first, first + 1] = coupling
+                end
+                extreme_config = KernelConfig(
+                    thread_count=1,
+                    ldlt_strategy=strategy,
+                    ldlt_block=2,
+                    ldlt_blocked_crossover=1,
+                )
+                extreme_factor = MultiFloatLinearAlgebra.ldlt!(
+                    copy(extreme); config=extreme_config,
+                )
+                @test MultiFloatLinearAlgebra.issuccess(extreme_factor)
+                @test factor_inertia(extreme_factor) ==
+                    (positive=2, negative=2, zero=0)
+                extreme_truth = T[1, -2, 3, -4]
+                extreme_rhs = extreme * extreme_truth
+                extreme_solution = solve(
+                    extreme_factor, extreme_rhs; config=extreme_config,
+                )
+                @test maximum(abs, extreme_solution - extreme_truth) <=
+                    T(32) * eps(T)
+                extreme_rhs_matrix = hcat(extreme_rhs, -extreme_rhs)
+                extreme_truth_matrix = hcat(extreme_truth, -extreme_truth)
+                extreme_solution_matrix = solve(
+                    extreme_factor, extreme_rhs_matrix; config=extreme_config,
+                )
+                @test maximum(
+                    abs, extreme_solution_matrix - extreme_truth_matrix,
+                ) <= T(32) * eps(T)
+            end
+
             singular_ldlt = MultiFloatLinearAlgebra.ldlt!(
                 T[1 1; 1 1]; check=false, config=single,
             )

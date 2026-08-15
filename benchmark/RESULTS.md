@@ -194,25 +194,30 @@ overhead. No result from this benchmark changes a production route.
 
 `workspace_cycles.jl` measures repeated in-place factor, solve, residual, and
 one-correction cycles with all numerical input/output arrays preallocated.
-Results below are Apple M4, Julia 1.12.6, one Julia thread, one BLAS thread,
+Results below are Apple M4, Julia 1.12.6, four Julia threads, one BLAS thread,
 `n=128`, and four right-hand sides.
 
 | Cycle | Arithmetic | Independently owned | `MFWorkspace` reuse |
 |---|---|---:|---:|
-| LU, direct GEMM | x2 / x3 / x4 | 1648 B | 560 B |
-| LU, packed GEMM | x2 | 64,240 B | 560 B |
-| LU, packed GEMM | x3 | 94,960 B | 560 B |
-| LU, packed GEMM | x4 | 125,680 B | 560 B |
-| blocked LDLT | x2 | 52,848 B | 224 B |
-| blocked LDLT | x3 | 70,256 B | 224 B |
-| blocked LDLT | x4 | 87,664 B | 224 B |
-| RRQR factor | x2 / x3 / x4 | 3232 / 4256 / 5280 B | 32 B |
+| LU, direct GEMM | x2 / x3 / x4 | 3504 / 3504 / 3760 B | same |
+| LU, packed GEMM | x2 | 67,632 B | 4016 B |
+| LU, packed GEMM | x3 | 98,352 B | 4016 B |
+| LU, packed GEMM | x4 | 129,328 B | 4272 B |
+| blocked LDLT | x2 | 167,600 B | 118,368 B |
+| blocked LDLT | x3 | 185,008 B | 119,392 B |
+| blocked LDLT | x4 | 216,784 B | 134,784 B |
+| RRQR factor | x2 | 7824 B | 3408 B |
+| RRQR factor | x3 | 10,800 B | 4336 B |
+| RRQR factor | x4 | 13,968 B | 5456 B |
 
 With a live factor and preallocated destination, general multi-RHS residual
 evaluation measured 0 B and one correction measured 96 B for all three types.
-The remaining workspace-cycle allocations are factor/view wrapper objects and
-fixed TRSM call overhead; numeric metadata, the weighted panel, and packed
-GEMM storage are reused. The workspace deliberately does not own residual or
+The RRQR workspace figures are unchanged from the exact-recomputation baseline;
+the higher independently-owned figures include the two norm-state vectors and
+reliability flags used by the hybrid update. The remaining workspace-cycle
+allocations are factor/view wrapper objects and fixed TRSM call overhead;
+numeric metadata, RRQR norm scratch, the weighted panel, and packed GEMM
+storage are reused. The workspace deliberately does not own residual or
 correction outputs because those public APIs already require caller storage.
 
 ## Solver-shape tuning campaign
@@ -414,3 +419,37 @@ not an operation-level delta.
 
 The 512/1024 workflows are manual by design so ordinary documentation and
 small code changes do not repeatedly consume large benchmark jobs.
+
+### Provider stabilization pass
+
+Apple M4, Julia 1.12.6, one BLAS thread. A 12-sample crossover audit showed
+that Julia task overhead dominates small GEMV and transpose-GEMV calls. Their
+static scheduler now uses `outputs * reduction * limb_count >= 100000`. At the
+solver-suite shapes `99x33` and `33x101`, a four-thread configuration therefore
+stays on the serial kernel and allocates 0 B. x2 medians fell from
+0.0339/0.0324 ms to 0.0126/0.0073 ms, and x3 from 0.0564/0.0333 ms to
+0.0273/0.0186 ms. SYMV retains a separate measured cutoff: n=128 for x2 and
+n=64 for x3/x4. Focused structured-kernel A/B runs
+showed reliable four-thread wins of 1.4x-3.5x on `96x33`, `48x48`, `64x64`,
+and `96x96`, so the established SYRK/GEMMT threshold was deliberately kept.
+
+RRQR profiling found exact trailing-column norm scans consumed 50%-74% of
+factor time. The conservative hybrid norm update always recomputes the pivot
+candidate exactly and also recomputes estimates that lose reliability or can
+compete within `sqrt(eps(T))`. Workspace-backed medians changed as follows:
+
+| Shape | x2 exact / hybrid | x3 exact / hybrid | x4 exact / hybrid |
+|---|---:|---:|---:|
+| 128x64 | 5.3 / 2.2 ms | 32.7 / 8.5 ms | 42.7 / 16.6 ms |
+| 256x128 | 44.4 / 16.0 ms | 188.5 / 56.6 ms | 342.7 / 107.6 ms |
+
+Random, scaled, equal-norm, duplicate, near-dependent, and zero-column cases
+preserved deterministic permutation/rank behavior and reconstruction and
+orthogonality gates for x2/x3/x4. Workspace-backed RRQR allocation remained
+3408/4336/5456 B at n=128; its new norm-state buffers are reused.
+
+LDLT 2x2 factor and solve paths now use a shared scaled pivoted-elimination
+formula instead of forming `d11*d22-d21^2`. Adversarial pure-off-diagonal
+blocks at binary exponents -600 and +600 pass for x2/x3/x4, blocked and
+unblocked factorization, and vector and matrix RHS. The former implementation
+respectively reported false singularity or produced NaN.

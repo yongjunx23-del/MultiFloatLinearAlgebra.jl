@@ -131,12 +131,41 @@ function _ldlt_smallest_abs_eigenvalue(
     return scale * (determinant / largest)
 end
 
-function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
-    one_by_one = 0
-    two_by_two = 0
+"""
+    factor_inertia(F::MFLDLT) -> NamedTuple
+
+Return `(positive, negative, zero)` for the accepted 1x1 and 2x2 D blocks.
+This O(n) accessor does not scan the full factor payload for finiteness or
+compute block-quality diagnostics.
+"""
+function factor_inertia(F::MFLDLT)
     positive = 0
     negative = 0
     zero_count = 0
+    k = 1
+    @inbounds while k <= length(F.blocks)
+        block = F.blocks[k]
+        if block == UInt8(1)
+            pos, neg, zer = _ldlt_inertia_1x1(F.factors[k, k])
+            k += 1
+        elseif block == UInt8(2) && k < length(F.blocks)
+            pos, neg, zer = _ldlt_inertia_2x2(
+                F.factors[k, k], F.dsub[k], F.factors[k + 1, k + 1],
+            )
+            k += 2
+        else
+            break
+        end
+        positive += pos
+        negative += neg
+        zero_count += zer
+    end
+    return (positive=positive, negative=negative, zero=zero_count)
+end
+
+function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
+    one_by_one = 0
+    two_by_two = 0
     minimum_block = nothing
     maximum_block_entry = zero(MF)
     k = 1
@@ -145,10 +174,6 @@ function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
         if block == UInt8(1)
             one_by_one += 1
             value = F.factors[k, k]
-            pos, neg, zer = _ldlt_inertia_1x1(value)
-            positive += pos
-            negative += neg
-            zero_count += zer
             block_value = abs(value)
             minimum_block = minimum_block === nothing ? block_value :
                 min(minimum_block, block_value)
@@ -159,10 +184,6 @@ function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
             d11 = F.factors[k, k]
             d21 = F.dsub[k]
             d22 = F.factors[k + 1, k + 1]
-            pos, neg, zer = _ldlt_inertia_2x2(d11, d21, d22)
-            positive += pos
-            negative += neg
-            zero_count += zer
             block_value = _ldlt_smallest_abs_eigenvalue(d11, d21, d22)
             minimum_block = minimum_block === nothing ? block_value :
                 min(minimum_block, block_value)
@@ -193,7 +214,7 @@ function factor_diagnostics(F::MFLDLT{MF}) where {MF<:MultiFloat}
         two_by_two_pivots=two_by_two,
         pivots=copy(F.pivots),
         blocks=copy(F.blocks),
-        inertia=(positive=positive, negative=negative, zero=zero_count),
+        inertia=factor_inertia(F),
         minimum_block_eigenvalue_magnitude=minimum_block,
         minimum_scaled_block=minimum_scaled_block,
         original_maximum=original_maximum,

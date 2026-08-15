@@ -49,6 +49,7 @@ function capabilities(
         lu=supported,
         ldlt=supported,
         rrqr=supported,
+        ldlt_lightweight_metadata=supported,
         factor_diagnostics=supported,
         apply_q=supported,
         solve_r=supported,

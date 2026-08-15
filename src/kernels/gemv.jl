@@ -128,7 +128,7 @@ function gemv!(
         length(x) == n || throw(DimensionMismatch("gemv! input length differs"))
         length(y) == m || throw(DimensionMismatch("gemv! output length differs"))
         workers = _workers(config, cld(m, 32))
-        if workers == 1 || m < 64
+        if workers == 1 || !_vector_thread_work_worthwhile(MF, m, n)
             _gemv_rows!(y, A, x, alpha, beta, 1, m)
             return y
         end
@@ -149,7 +149,7 @@ function gemv!(
     length(x) == m || throw(DimensionMismatch("gemv! input length differs"))
     length(y) == n || throw(DimensionMismatch("gemv! output length differs"))
     workers = _workers(config, cld(n, 32))
-    if workers == 1 || n < 64
+    if workers == 1 || !_vector_thread_work_worthwhile(MF, n, m)
         _gemv_t_columns!(y, A, x, alpha, beta, 1, n)
         return y
     end

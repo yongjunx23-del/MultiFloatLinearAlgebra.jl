@@ -23,6 +23,20 @@ size(F)
 eltype(F)
 ```
 
+LDLT callers that need only structural facts use the O(n) lightweight
+accessors rather than the comprehensive diagnostic scan:
+
+```julia
+factor_pivots(F)       # raw Bunch-Kaufman step pivots; defensive copy
+factor_blocks(F)       # UInt8 1/2 block-start markers; defensive copy
+factor_permutation(F)  # p such that A_original[p, p] = L*D*L'
+factor_inertia(F)      # (positive, negative, zero)
+```
+
+`factor_inertia` scans only the stored D blocks. It does not perform the full
+factor-payload finiteness and block-quality scan supplied by
+`factor_diagnostics`.
+
 The stable states are `:success`, `:nonfinite_input`, `:not_posdef`,
 `:singular`, and `:numerical_breakdown`. RRQR rank deficiency is not a failed
 factorization: callers choose a rank threshold through `numerical_rank` or
@@ -44,8 +58,8 @@ rank threshold. Rectangular, rank-selected, and least-squares routes use
 `factor_permutation`, `apply_q!`, and `solve_r!` explicitly: MFLA does not
 infer rank or formulation.
 
-Concrete fields such as pivots, blocks, reflector coefficients, permutation
-storage, and Householder layout are private.
+Concrete fields and Householder layout remain private. The accessors above and
+the QR metadata accessors return caller-owned copies where applicable.
 
 ## Failure and storage
 
@@ -90,8 +104,8 @@ range even where internal code remains generic.
 
 `capabilities(T)` is a pure descriptor for the exact Float64-based MultiFloat
 type `T`. It includes `provider`, `scalar_type`, workspace/concurrency facts,
-SYRK storage facts, exact `mixed_residual_target_types`, and these ownership
-facts:
+SYRK storage facts, `ldlt_lightweight_metadata`, exact
+`mixed_residual_target_types`, and these ownership facts:
 
 ```text
 factor_metadata_ownership = :factor_owned

@@ -699,6 +699,15 @@ include("adversarial.jl")
                 @test numerical_rank(Fnear) == 5
                 @test numerical_rank(Fnear; rtol=sqrt(eps(T))) == 4
 
+                # Equal exact norms retain the smallest original-column tie
+                # rule even though noncompetitive norms use downdated state.
+                equal_norm = zeros(T, 8, 4)
+                for column in 1:4
+                    equal_norm[column, column] = one(T)
+                end
+                Fequal = rrqr!(copy(equal_norm))
+                @test factor_permutation(Fequal) == collect(1:4)
+
                 # Scaled sum-of-squares pivot norms avoid squaring these
                 # extreme column scales directly.
                 scaled = T.(randn(10, 4))
@@ -1359,10 +1368,31 @@ include("adversarial.jl")
                 @test dd.minimum_scaled_block == one(T) / T(order - 1)
                 @test abs(dd.block_growth - one(T)) <= T(8) * eps(T)
                 @test dd.finite
+                @test factor_inertia(Fld) == dd.inertia
+                @test factor_permutation(Fld) == collect(1:order)
+                @test factor_blocks(Fld) == dd.blocks
+                @test factor_pivots(Fld) == dd.pivots
+                copied_pivots = factor_pivots(Fld)
+                copied_blocks = factor_blocks(Fld)
+                copied_permutation = factor_permutation(Fld)
+                copied_pivots[1] = 0
+                copied_blocks[1] = 0
+                copied_permutation[1] = 0
+                @test factor_pivots(Fld)[1] != 0
+                @test factor_blocks(Fld)[1] == UInt8(2)
+                @test factor_permutation(Fld)[1] == 1
                 dd.pivots[1] = 0
                 dd.blocks[1] = 0
                 @test factor_diagnostics(Fld).pivots[1] != 0
                 @test factor_diagnostics(Fld).blocks[1] == UInt8(2)
+
+                swapped = T[1 10; 10 101]
+                Fswapped = MultiFloatLinearAlgebra.ldlt!(
+                    copy(swapped); config=config,
+                )
+                @test factor_permutation(Fswapped) == [2, 1]
+                @test factor_inertia(Fswapped) ==
+                    factor_diagnostics(Fswapped).inertia
 
                 # QR rank is reported only at the explicit threshold supplied
                 # to factor_diagnostics; the stored factor remains unchanged.
@@ -2011,6 +2041,11 @@ include("adversarial.jl")
                     @test borrowed_diagnostics.pivots == owned_diagnostics.pivots
                     @test borrowed_diagnostics.blocks == owned_diagnostics.blocks
                     @test borrowed_diagnostics.inertia == owned_diagnostics.inertia
+                    @test factor_pivots(borrowed) == factor_pivots(owned)
+                    @test factor_blocks(borrowed) == factor_blocks(owned)
+                    @test factor_permutation(borrowed) ==
+                        factor_permutation(owned)
+                    @test factor_inertia(borrowed) == factor_inertia(owned)
                     ldlt_rhs = T.(randn(n))
                     @test solve(borrowed, ldlt_rhs; config=ldlt_config) ==
                         solve(owned, ldlt_rhs; config=ldlt_config)
@@ -2094,6 +2129,7 @@ include("adversarial.jl")
             :lu,
             :ldlt,
             :rrqr,
+            :ldlt_lightweight_metadata,
             :factor_diagnostics,
             :apply_q,
             :solve_r,
