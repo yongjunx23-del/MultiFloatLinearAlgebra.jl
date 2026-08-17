@@ -11,7 +11,14 @@ refinement policy, and certification in their own layers.
 
 ## Installation
 
-Until the package is registered in Julia General:
+Install the registered release from Julia General:
+
+```julia
+using Pkg
+Pkg.add("MultiFloatLinearAlgebra")
+```
+
+To track the current development branch instead:
 
 ```julia
 using Pkg
