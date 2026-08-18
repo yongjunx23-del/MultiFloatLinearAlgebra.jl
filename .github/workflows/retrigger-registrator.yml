@@ -1,0 +1,54 @@
+name: Retrigger Registrator with release notes
+
+on:
+  push:
+    paths:
+      - .github/workflows/retrigger-registrator.yml
+
+permissions:
+  contents: write
+
+jobs:
+  retrigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on registration commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          owner = "yongjunx23-del"
+          repo = "MultiFloatLinearAlgebra.jl"
+          commit = "c0c78b365036a28b9dabb9c31a10cb60370a5bae"
+          body = """@JuliaRegistrator register
+
+Release notes:
+
+## MultiFloatLinearAlgebra v0.1.0
+
+Initial registered release of MultiFloatLinearAlgebra.jl, a CPU linear-algebra backend for Float64-based MultiFloats.jl arithmetic.
+
+### Highlights
+
+- Specialized dense BLAS-like kernels for `Float64x2`, `Float64x3`, and `Float64x4`, including GEMV, GEMM, SYRK, GEMMT, TRSM, TRSV, TRMM, and SYMV.
+- Cholesky, LU, symmetric-indefinite LDLT, and column-pivoted RRQR factorizations.
+- Vector and multi-RHS factor solves with a solver-facing factor API and diagnostics.
+- Residual, backward-error, mixed-precision residual, and refinement-correction utilities.
+- Reusable caller-owned workspaces, deterministic reduction order, and explicit threading.
+- CI coverage on Julia 1.10, 1.11, and 1.12 on Linux and macOS.
+
+This is the first registered release; there are no breaking changes relative to an earlier registered version.
+"""
+          url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit}/comments"
+          data = json.dumps({"body": body}).encode()
+          req = urllib.request.Request(url, data=data, method="POST")
+          req.add_header("Authorization", f"Bearer {os.environ['GITHUB_TOKEN']}")
+          req.add_header("Accept", "application/vnd.github+json")
+          req.add_header("X-GitHub-Api-Version", "2022-11-28")
+          with urllib.request.urlopen(req) as response:
+              print(response.status)
+          PY
