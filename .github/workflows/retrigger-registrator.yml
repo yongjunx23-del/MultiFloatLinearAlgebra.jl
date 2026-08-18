@@ -1,15 +1,16 @@
 name: Retrigger Registrator with release notes
 
 on:
-  push:
-    paths:
-      - .github/workflows/retrigger-registrator.yml
+  issue_comment:
+    types:
+      - created
 
 permissions:
   contents: write
 
 jobs:
   retrigger:
+    if: github.event.issue.number == 2 && github.event.comment.body == 'retrigger-registrator-v0.1.0-release-notes'
     runs-on: ubuntu-latest
     steps:
       - name: Comment on registration commit
