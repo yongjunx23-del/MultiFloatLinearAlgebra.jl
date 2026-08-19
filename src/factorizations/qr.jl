@@ -267,13 +267,13 @@ function _qr_make_reflector!(
     return tau
 end
 
-function _qr_apply_reflector_to_trailing!(
+@inline function _qr_apply_reflector_to_column!(
     A::AbstractMatrix{MF},
     tau::MF,
     step::Int,
+    column::Int,
 ) where {MF<:MultiFloat}
-    iszero(tau) && return nothing
-    @inbounds for column in (step + 1):size(A, 2)
+    @inbounds begin
         projection = A[step, column]
         for row in (step + 1):size(A, 1)
             projection += A[row, step] * A[row, column]
@@ -282,6 +282,33 @@ function _qr_apply_reflector_to_trailing!(
         A[step, column] -= projection
         for row in (step + 1):size(A, 1)
             A[row, column] -= A[row, step] * projection
+        end
+    end
+    return nothing
+end
+
+function _qr_apply_reflector_to_trailing!(
+    A::AbstractMatrix{MF},
+    tau::MF,
+    step::Int,
+) where {MF<:MultiFloat}
+    iszero(tau) && return nothing
+    columns = size(A, 2)
+    trailing_columns = columns - step
+    trailing_rows = size(A, 1) - step
+    # The per-column updates are independent (each reads the fixed
+    # reflector column and writes only its own column), so the dominant
+    # O(rows x trailing_columns) trailing update parallelizes across
+    # columns with bit-identical results.  Keep the serial path for
+    # small trailing panels where task-dispatch overhead dominates.
+    if trailing_columns * trailing_rows >= 16384 &&
+       Threads.nthreads() > 1
+        Threads.@threads for column in (step + 1):columns
+            _qr_apply_reflector_to_column!(A, tau, step, column)
+        end
+    else
+        for column in (step + 1):columns
+            _qr_apply_reflector_to_column!(A, tau, step, column)
         end
     end
     return nothing
