@@ -89,9 +89,17 @@ function syrk!(
         return output
     end
 
+    # Dynamic work queue: column c costs (columns - c + 1) reductions, so a
+    # static strided split leaves the worker owning column 1 with ~13% more
+    # work than the worker owning the last column.  Grabbing the next column
+    # from a shared atomic counter self-balances the triangular workload at
+    # negligible cost (one atomic add per column).
+    next_column = Threads.Atomic{Int}(1)
     @sync for worker in 1:workers
         Threads.@spawn begin
-            @inbounds for column in worker:workers:columns
+            while true
+                column = Threads.atomic_add!(next_column, 1)
+                column > columns && break
                 _syrk_column!(output, panel, column, alpha, beta)
             end
         end
@@ -222,9 +230,14 @@ function syrk_packed!(
         return output
     end
 
+    # Same dynamic work queue as `syrk!`: the triangular column cost makes a
+    # static strided split imbalanced, and an atomic counter self-balances it.
+    next_column = Threads.Atomic{Int}(1)
     @sync for worker in 1:workers
         Threads.@spawn begin
-            @inbounds for column in worker:workers:columns
+            while true
+                column = Threads.atomic_add!(next_column, 1)
+                column > columns && break
                 _syrk_packed_column!(
                     output,
                     panel,
