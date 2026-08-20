@@ -40,7 +40,7 @@ export AbstractMFFactorization, factor_status, factor_kind, factor_matrix
 export factor_state, factor_precision, factor_provider, factor_diagnostics
 export factor_pivots, factor_blocks, factor_permutation, factor_inertia
 export factor_rdiag, numerical_rank
-export MFCholesky, MFLU, MFLDLT, MFQR, cholesky!, lu!, ldlt!, rrqr!, issuccess
+export MFCholesky, MFLU, MFLDLT, MFQR, cholesky!, lu!, ldlt!, qr!, rrqr!, issuccess
 export apply_q!, solve_r!
 export ldiv!, solve
 export residual!, residual_mixed!, normwise_backward_error, refinement_correction!

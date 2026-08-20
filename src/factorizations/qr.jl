@@ -291,6 +291,7 @@ function _qr_apply_reflector_to_trailing!(
     A::AbstractMatrix{MF},
     tau::MF,
     step::Int,
+    threads::Int=Threads.nthreads(),
 ) where {MF<:MultiFloat}
     iszero(tau) && return nothing
     columns = size(A, 2)
@@ -301,8 +302,7 @@ function _qr_apply_reflector_to_trailing!(
     # O(rows x trailing_columns) trailing update parallelizes across
     # columns with bit-identical results.  Keep the serial path for
     # small trailing panels where task-dispatch overhead dominates.
-    if trailing_columns * trailing_rows >= 16384 &&
-       Threads.nthreads() > 1
+    if trailing_columns * trailing_rows >= 16384 && threads > 1
         Threads.@threads for column in (step + 1):columns
             _qr_apply_reflector_to_column!(A, tau, step, column)
         end
@@ -337,6 +337,7 @@ function rrqr!(
     A::AbstractMatrix{MF};
     check::Bool=true,
     workspace::Union{Nothing,MFWorkspace{MF}}=nothing,
+    threads::Int=Threads.nthreads(),
 ) where {MF<:MultiFloat}
     _check_supported(MF)
     Base.require_one_based_indexing(A)
@@ -378,11 +379,67 @@ function rrqr!(
         norm_dirty[step], norm_dirty[pivot] =
             norm_dirty[pivot], norm_dirty[step]
         tau[step] = _qr_make_reflector!(A, step)
-        _qr_apply_reflector_to_trailing!(A, tau[step], step)
+        _qr_apply_reflector_to_trailing!(A, tau[step], step, threads)
         _qr_update_norm_state!(
             A, tau[step], step, norm_scale, norm_sum, norm_dirty,
             norm_reliability_floor,
         )
+    end
+    owned_tau, owned_permutation =
+        _owned_qr_metadata(tau, permutation, workspace)
+    cycle_leaders = _qr_permutation_cycle_leaders!(owned_permutation)
+    return MFQR{MF,typeof(A),typeof(owned_tau),typeof(owned_permutation)}(
+        A, owned_tau, owned_permutation, cycle_leaders, 0,
+    )
+end
+
+"""
+    qr!(A; check=true, workspace=nothing)
+
+Compute a deterministic non-pivoted Householder QR factorization in place.
+The result satisfies `A = Q * R`.  Householder vectors are stored below the
+diagonal of `factor_matrix(F)` and `R` is stored on and above it; the
+permutation is the identity.
+
+This is the fixed-order counterpart to [`rrqr!`](@ref): it performs no column
+pivoting, so it does not reveal numerical rank.  Callers that need
+rank-revealing behavior must use `rrqr!`, or verify the fixed-order result
+themselves (e.g. by checking the `R` diagonal against a caller-supplied
+threshold).
+
+With `workspace=MFWorkspace(T)`, temporary metadata storage is reused during
+factorization and the returned factor owns its reflector coefficients and
+permutation.
+"""
+function qr!(
+    A::AbstractMatrix{MF};
+    check::Bool=true,
+    workspace::Union{Nothing,MFWorkspace{MF}}=nothing,
+    threads::Int=Threads.nthreads(),
+) where {MF<:MultiFloat}
+    _check_supported(MF)
+    Base.require_one_based_indexing(A)
+    m, n = size(A)
+    reflector_count = min(m, n)
+    finite_input = _all_finite(A)
+    !finite_input && check &&
+        throw(DomainError(A, "qr!: input matrix contains non-finite entries"))
+    tau, permutation = _prepare_qr_metadata!(
+        MF, reflector_count, n, workspace,
+    )
+
+    if !finite_input
+        owned_tau, owned_permutation =
+            _owned_qr_metadata(tau, permutation, workspace)
+        cycle_leaders = _qr_permutation_cycle_leaders!(owned_permutation)
+        return MFQR{MF,typeof(A),typeof(owned_tau),typeof(owned_permutation)}(
+            A, owned_tau, owned_permutation, cycle_leaders, -1,
+        )
+    end
+
+    @inbounds for step in 1:reflector_count
+        tau[step] = _qr_make_reflector!(A, step)
+        _qr_apply_reflector_to_trailing!(A, tau[step], step, threads)
     end
     owned_tau, owned_permutation =
         _owned_qr_metadata(tau, permutation, workspace)
