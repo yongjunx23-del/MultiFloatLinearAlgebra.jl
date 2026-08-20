@@ -80,6 +80,8 @@ mutable struct MFWorkspace{MF<:MultiFloat}
     qr_norm_scale::Vector{MF}
     qr_norm_sum::Vector{MF}
     qr_norm_dirty::Vector{Bool}
+    qr_ftranspose::Matrix{MF}
+    qr_aux::Vector{MF}
     factor_capacity::Int
     ldlt_block_capacity::Int
 end
@@ -113,6 +115,8 @@ function MFWorkspace(
         Vector{MF}(undef, factor_capacity),
         Vector{MF}(undef, factor_capacity),
         Vector{Bool}(undef, factor_capacity),
+        Matrix{MF}(undef, 0, 0),
+        Vector{MF}(undef, 0),
         factor_capacity,
         ldlt_block_capacity,
     )

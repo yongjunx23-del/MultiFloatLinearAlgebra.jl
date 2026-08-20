@@ -249,6 +249,308 @@ function _qr_update_norm_state!(
     return nothing
 end
 
+const _QR_BLOCK_SIZE = 16
+const _QR_BLOCK_WORK_CROSSOVER = 16_384
+
+@inline function _qr_use_blocked_panel(
+    rows::Int,
+    columns::Int,
+    reflector_count::Int,
+)
+    return reflector_count >= _QR_BLOCK_SIZE &&
+           Int128(rows) * Int128(columns) >=
+           Int128(_QR_BLOCK_WORK_CROSSOVER)
+end
+
+function _prepare_qr_block_scratch!(
+    ::Type{MF},
+    block_size::Int,
+    column_count::Int,
+    workspace::Union{Nothing,MFWorkspace{MF}},
+) where {MF<:MultiFloat}
+    if workspace === nothing
+        return (
+            zeros(MF, block_size, column_count),
+            Vector{MF}(undef, block_size),
+        )
+    end
+    current_rows, current_columns = size(workspace.qr_ftranspose)
+    if current_rows < block_size || current_columns < column_count
+        workspace.qr_ftranspose = Matrix{MF}(
+            undef,
+            max(current_rows, block_size),
+            max(current_columns, column_count),
+        )
+    end
+    length(workspace.qr_aux) < block_size &&
+        resize!(workspace.qr_aux, block_size)
+    return (
+        @view(workspace.qr_ftranspose[1:block_size, 1:column_count]),
+        @view(workspace.qr_aux[1:block_size]),
+    )
+end
+
+@inline function _qr_select_pivot_downdated(
+    permutation::AbstractVector{Int},
+    step::Int,
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    pivot = step
+    pivot_norm = _qr_norm_from_state(scale, scaled_sum, step)
+    @inbounds for column in (step + 1):length(permutation)
+        candidate_norm = _qr_norm_from_state(scale, scaled_sum, column)
+        if candidate_norm > pivot_norm ||
+           (candidate_norm == pivot_norm &&
+            permutation[column] < permutation[pivot])
+            pivot = column
+            pivot_norm = candidate_norm
+        end
+    end
+    return pivot
+end
+
+function _rrqr_unblocked!(
+    A::AbstractMatrix{MF},
+    tau::AbstractVector{MF},
+    permutation::AbstractVector{Int},
+    norm_scale::AbstractVector{MF},
+    norm_sum::AbstractVector{MF},
+    norm_dirty::AbstractVector{Bool},
+    norm_margin::MF,
+    norm_reliability_floor::MF,
+    threads::Int,
+) where {MF<:MultiFloat}
+    reflector_count = length(tau)
+    @inbounds for step in 1:reflector_count
+        pivot = _qr_select_pivot_hybrid!(
+            A, permutation, step, norm_scale, norm_sum, norm_dirty,
+            norm_margin,
+        )
+        _qr_swap_columns!(A, step, pivot)
+        permutation[step], permutation[pivot] =
+            permutation[pivot], permutation[step]
+        norm_scale[step], norm_scale[pivot] =
+            norm_scale[pivot], norm_scale[step]
+        norm_sum[step], norm_sum[pivot] =
+            norm_sum[pivot], norm_sum[step]
+        norm_dirty[step], norm_dirty[pivot] =
+            norm_dirty[pivot], norm_dirty[step]
+        tau[step] = _qr_make_reflector!(A, step)
+        _qr_apply_reflector_to_trailing!(A, tau[step], step, threads)
+        _qr_update_norm_state!(
+            A, tau[step], step, norm_scale, norm_sum, norm_dirty,
+            norm_reliability_floor,
+        )
+    end
+    return nothing
+end
+
+@inline function _qr_has_unreliable_trailing_norm(
+    dirty::AbstractVector{Bool},
+    first_column::Int,
+    last_column::Int=length(dirty),
+)
+    first_column > last_column && return false
+    last = min(last_column, length(dirty))
+    first_column > last && return false
+    @inbounds for column in first_column:last
+        dirty[column] && return true
+    end
+    return false
+end
+
+# Exact per-column norm rebuilds are independent. Each
+# column keeps the scalar `_qr_recompute_norm!` row order; workers only split
+# columns, so no reduction arithmetic or pivot state changes.
+function _qr_recompute_norm_columns_parallel!(
+    A::AbstractMatrix{MF},
+    scale::AbstractVector{MF},
+    scaled_sum::AbstractVector{MF},
+    dirty::AbstractVector{Bool},
+    first_row::Int,
+    first_column::Int,
+    last_column::Int,
+    thread_count::Int,
+) where {MF<:MultiFloat}
+    first_column > last_column && return nothing
+    workers = max(1, min(thread_count, Threads.nthreads(), last_column - first_column + 1))
+    if workers == 1
+        @inbounds for column in first_column:last_column
+            _qr_recompute_norm!(A, scale, scaled_sum, dirty, first_row, column)
+        end
+        return nothing
+    end
+    jobs = last_column - first_column + 1
+    chunk = cld(jobs, workers)
+    @sync for worker in 1:workers
+        first = first_column + (worker - 1) * chunk
+        last = min(first + chunk - 1, last_column)
+        first <= last || continue
+        Threads.@spawn begin
+            @inbounds for column in first:last
+                _qr_recompute_norm!(A, scale, scaled_sum, dirty, first_row, column)
+            end
+        end
+    end
+    return nothing
+end
+
+function _rrqr_blocked!(
+    A::AbstractMatrix{MF},
+    tau::AbstractVector{MF},
+    permutation::AbstractVector{Int},
+    norm_scale::AbstractVector{MF},
+    norm_sum::AbstractVector{MF},
+    norm_dirty::AbstractVector{Bool},
+    norm_reliability_floor::MF,
+    threads::Int,
+    workspace::Union{Nothing,MFWorkspace{MF}},
+) where {MF<:MultiFloat}
+    rows, columns = size(A)
+    reflector_count = length(tau)
+    block_size = min(_QR_BLOCK_SIZE, reflector_count)
+    Ftranspose, auxiliary = _prepare_qr_block_scratch!(
+        MF, block_size, columns, workspace,
+    )
+    kernel_config = KernelConfig(thread_count=max(threads, 1))
+
+    block_start = 1
+    while block_start <= reflector_count
+        requested = min(
+            block_size, reflector_count - block_start + 1,
+        )
+        fill!(Ftranspose, zero(MF))
+        actual = 0
+
+        for local_step in 1:requested
+            step = block_start + local_step - 1
+            pivot = _qr_select_pivot_downdated(
+                permutation, step, norm_scale, norm_sum,
+            )
+
+            _qr_swap_columns!(A, step, pivot)
+            @inbounds for prior in 1:(local_step - 1)
+                Ftranspose[prior, step], Ftranspose[prior, pivot] =
+                    Ftranspose[prior, pivot], Ftranspose[prior, step]
+            end
+            permutation[step], permutation[pivot] =
+                permutation[pivot], permutation[step]
+            norm_scale[step], norm_scale[pivot] =
+                norm_scale[pivot], norm_scale[step]
+            norm_sum[step], norm_sum[pivot] =
+                norm_sum[pivot], norm_sum[step]
+            norm_dirty[step], norm_dirty[pivot] =
+                norm_dirty[pivot], norm_dirty[step]
+
+            # Apply the delayed prefix to the selected column. Swapping the
+            # corresponding F entries above makes this correct even when a
+            # column leaves and later re-enters the current panel.
+            if local_step > 1
+                @inbounds for row in step:rows
+                    correction = zero(MF)
+                    for prior in 1:(local_step - 1)
+                        correction +=
+                            A[row, block_start + prior - 1] *
+                            Ftranspose[prior, step]
+                    end
+                    A[row, step] -= correction
+                end
+            end
+
+            tau[step] = _qr_make_reflector!(A, step)
+            diagonal = A[step, step]
+            A[step, step] = one(MF)
+
+            # DLAQPS F recurrence. The new row records the delayed action on
+            # every column to the right while the panel itself stays narrow.
+            if step < columns
+                gemv!(
+                    view(Ftranspose, local_step, (step + 1):columns),
+                    view(A, step:rows, (step + 1):columns),
+                    view(A, step:rows, step),
+                    tau[step], zero(MF);
+                    trans=:T,
+                    config=kernel_config,
+                )
+            end
+            if local_step > 1
+                gemv!(
+                    view(auxiliary, 1:(local_step - 1)),
+                    view(
+                        A,
+                        step:rows,
+                        block_start:(step - 1),
+                    ),
+                    view(A, step:rows, step),
+                    -tau[step], zero(MF);
+                    trans=:T,
+                    config=kernel_config,
+                )
+                @inbounds for column in (step + 1):columns
+                    correction = zero(MF)
+                    for prior in 1:(local_step - 1)
+                        correction +=
+                            Ftranspose[prior, column] * auxiliary[prior]
+                    end
+                    Ftranspose[local_step, column] += correction
+                end
+            end
+
+            # Materialize the current R row; rows below it remain delayed
+            # until the level-3 update at the panel boundary.
+            @inbounds for column in (step + 1):columns
+                correction = zero(MF)
+                for panel_column in 1:local_step
+                    correction +=
+                        A[step, block_start + panel_column - 1] *
+                        Ftranspose[panel_column, column]
+                end
+                A[step, column] -= correction
+            end
+            A[step, step] = diagonal
+
+            _qr_update_norm_state!(
+                A, tau[step], step, norm_scale, norm_sum, norm_dirty,
+                norm_reliability_floor,
+            )
+            actual = local_step
+
+            # A cancellation-sensitive norm cannot be recomputed while the
+            # bottom update is delayed. End this panel, apply it, then rebuild
+            # every trailing norm exactly from the updated matrix.
+            _qr_has_unreliable_trailing_norm(norm_dirty, step + 1, columns) &&
+                break
+        end
+
+        block_end = block_start + actual - 1
+        if block_end < rows && block_end < columns
+            gemm!(
+                view(
+                    A,
+                    (block_end + 1):rows,
+                    (block_end + 1):columns,
+                ),
+                view(A, (block_end + 1):rows, block_start:block_end),
+                view(
+                    Ftranspose,
+                    1:actual,
+                    (block_end + 1):columns,
+                ),
+                -one(MF), one(MF);
+                config=kernel_config,
+                workspace=workspace,
+            )
+        end
+        _qr_recompute_norm_columns_parallel!(
+            A, norm_scale, norm_sum, norm_dirty,
+            block_end + 1, block_end + 1, columns, threads,
+        )
+        block_start = block_end + 1
+    end
+    return nothing
+end
+
 function _qr_make_reflector!(
     A::AbstractMatrix{MF},
     step::Int,
@@ -322,12 +624,14 @@ The result satisfies `A_original[:, factor_permutation(F)] = Q * R`.
 Householder vectors are stored below the diagonal of `factor_matrix(F)` and
 `R` is stored on and above it.
 
-Column norms use scale-safe downdates, with exact recomputation whenever an
-estimate loses reliability or can compete for the next pivot. Exact pivot-
-norm ties choose the smallest original column index. Rank
-deficiency is a successful factorization; [`numerical_rank`](@ref) applies a
-caller-supplied threshold after factorization. No fallback or rank policy is
-performed here.
+Column norms use scale-safe downdates. Small problems use the direct hybrid
+path; larger panels use a DLAQPS-style delayed update and finish each panel
+with a level-3 matrix multiplication. A panel ends early whenever a norm
+downdate loses reliability, after which all trailing norms are recomputed from
+the fully updated matrix. Exact norm ties choose the smallest original column
+index. Rank deficiency is a successful factorization;
+[`numerical_rank`](@ref) applies a caller-supplied threshold after
+factorization. No fallback or rank policy is performed here.
 
 With `workspace=MFWorkspace(T)`, temporary metadata storage is reused during
 factorization and the returned factor owns its reflector coefficients and
@@ -365,24 +669,17 @@ function rrqr!(
     norm_margin = sqrt(eps(MF))
     norm_reliability_floor = MF(16) * eps(MF)
 
-    @inbounds for step in 1:reflector_count
-        pivot = _qr_select_pivot_hybrid!(
-            A, permutation, step, norm_scale, norm_sum, norm_dirty,
-            norm_margin,
+    if _qr_use_blocked_panel(m, n, reflector_count)
+        _rrqr_blocked!(
+            A, tau, permutation,
+            norm_scale, norm_sum, norm_dirty,
+            norm_reliability_floor, threads, workspace,
         )
-        _qr_swap_columns!(A, step, pivot)
-        permutation[step], permutation[pivot] =
-            permutation[pivot], permutation[step]
-        norm_scale[step], norm_scale[pivot] =
-            norm_scale[pivot], norm_scale[step]
-        norm_sum[step], norm_sum[pivot] = norm_sum[pivot], norm_sum[step]
-        norm_dirty[step], norm_dirty[pivot] =
-            norm_dirty[pivot], norm_dirty[step]
-        tau[step] = _qr_make_reflector!(A, step)
-        _qr_apply_reflector_to_trailing!(A, tau[step], step, threads)
-        _qr_update_norm_state!(
-            A, tau[step], step, norm_scale, norm_sum, norm_dirty,
-            norm_reliability_floor,
+    else
+        _rrqr_unblocked!(
+            A, tau, permutation,
+            norm_scale, norm_sum, norm_dirty,
+            norm_margin, norm_reliability_floor, threads,
         )
     end
     owned_tau, owned_permutation =

@@ -86,6 +86,122 @@ function qr_explicit_r(F)
     return R
 end
 
+# A deliberately scalar reference path for blocked-RRQR validation.  This
+# exercises the package's unblocked panel update at the same precision while
+# keeping the blocked implementation under test independent of its delayed
+# WY/GEMM update.  The reference returns compact Householder storage rather
+# than an MFQR wrapper so the test does not depend on private constructors.
+function qr_unblocked_reference(A)
+    T = eltype(A)
+    B = copy(A)
+    m, n = size(B)
+    reflector_count = min(m, n)
+    tau = zeros(T, reflector_count)
+    permutation = collect(1:n)
+    norm_scale, norm_sum, norm_dirty =
+        MultiFloatLinearAlgebra._prepare_qr_norm_state(T, n, nothing)
+    MultiFloatLinearAlgebra._qr_initialize_norm_state!(
+        B, norm_scale, norm_sum, norm_dirty,
+    )
+    MultiFloatLinearAlgebra._rrqr_unblocked!(
+        B, tau, permutation,
+        norm_scale, norm_sum, norm_dirty,
+        sqrt(eps(T)), T(16) * eps(T), 1,
+    )
+    return B, tau, permutation
+end
+
+function qr_reference_apply_qt!(X, factors, tau)
+    T = eltype(X)
+    @inbounds for step in eachindex(tau)
+        iszero(tau[step]) && continue
+        for column in axes(X, 2)
+            projection = X[step, column]
+            for row in (step + 1):size(factors, 1)
+                projection += factors[row, step] * X[row, column]
+            end
+            projection *= tau[step]
+            X[step, column] -= projection
+            for row in (step + 1):size(factors, 1)
+                X[row, column] -= factors[row, step] * projection
+            end
+        end
+    end
+    return X
+end
+
+function qr_reference_rank(factors; rtol=zero(eltype(factors)), atol=zero(eltype(factors)))
+    T = eltype(factors)
+    diagonal_count = min(size(factors)...)
+    largest = zero(T)
+    @inbounds for index in 1:diagonal_count
+        largest = max(largest, abs(factors[index, index]))
+    end
+    threshold = max(T(atol), T(rtol) * largest)
+    rank = 0
+    @inbounds for index in 1:diagonal_count
+        abs(factors[index, index]) > threshold || break
+        rank += 1
+    end
+    return rank
+end
+
+function blocked_rrqr_adversarial_matrix(T, kind; rows=256, columns=64)
+    A = zeros(T, rows, columns)
+    if kind === :near_tie
+        # All columns have comparable norms, with close angular separations;
+        # this stresses pivot tie handling without relying on random state.
+        for column in 1:columns, row in 1:rows
+            A[row, column] = T(
+                sin(0.017 * row + 0.19 * column) +
+                0.18 * cos(0.011 * row * column) +
+                0.03 * sin(0.003 * row^2 + column),
+            )
+        end
+    elseif kind === :cancellation
+        # The second column is almost parallel to the first.  Its residual
+        # norm is below the downdate reliability floor, forcing an exact
+        # rebuild at a blocked-panel boundary.
+        for row in 1:rows
+            u = T(sin(0.021 * row) + 0.4 * cos(0.007 * row))
+            v = T(cos(0.013 * row) - 0.2 * sin(0.005 * row))
+            A[row, 1] = u
+            A[row, 2] = u + T(ldexp(1.0, -60)) * v
+        end
+        for column in 3:columns, row in 1:rows
+            A[row, column] = T(
+                sin(0.019 * row + 0.17 * column) +
+                0.11 * cos(0.004 * row * column),
+            )
+        end
+    elseif kind === :rank_deficient
+        core = zeros(T, rows, 30)
+        for column in axes(core, 2), row in axes(core, 1)
+            core[row, column] = T(
+                sin(0.013 * row + 0.23 * column) +
+                0.21 * cos(0.005 * row * column),
+            )
+        end
+        A[:, 1:30] .= core
+        A[:, 31:40] .= core[:, 2:11]
+        A[:, 41:columns] .= zero(T)
+    elseif kind === :extreme_scale
+        for column in 1:columns, row in 1:rows
+            A[row, column] = T(
+                sin(0.015 * row + 0.07 * column) +
+                0.17 * cos(0.009 * row * column),
+            )
+        end
+        exponents = (-300, -150, 0, 150, 300)
+        for column in 1:columns
+            A[:, column] .*= T(ldexp(1.0, exponents[mod1(column, length(exponents))]))
+        end
+    else
+        throw(ArgumentError("unknown adversarial QR matrix kind: $kind"))
+    end
+    return A
+end
+
 include("mulacc_x3_proof_vectors.jl")
 include("adversarial.jl")
 
@@ -708,6 +824,50 @@ include("adversarial.jl")
                 Fequal = rrqr!(copy(equal_norm))
                 @test factor_permutation(Fequal) == collect(1:4)
 
+                # The blocked DLAQPS path must preserve a column that leaves
+                # and later re-enters a panel. This deterministic matrix hits
+                # that history and has numerical rank 31 at rtol=1e-12.
+                blocked_source = Matrix{T}(undef, 500, 40)
+                for column in axes(blocked_source, 2),
+                    row in axes(blocked_source, 1)
+                    blocked_source[row, column] = T(
+                        sin(row * 0.01 + column * 0.7) +
+                        0.1 * cos(row * 0.003 * column),
+                    )
+                end
+                Fblocked = rrqr!(copy(blocked_source); threads=2)
+                blocked_workspace = MFWorkspace(T; thread_count=2)
+                Fblocked_workspace = rrqr!(
+                    copy(blocked_source);
+                    threads=2,
+                    workspace=blocked_workspace,
+                )
+                @test factor_matrix(Fblocked_workspace) ==
+                    factor_matrix(Fblocked)
+                @test factor_permutation(Fblocked_workspace) ==
+                    factor_permutation(Fblocked)
+                @test numerical_rank(Fblocked; rtol=T(1e-12)) == 31
+                @test sort(factor_permutation(Fblocked)) == collect(1:40)
+
+                transformed = copy(
+                    blocked_source[:, factor_permutation(Fblocked)],
+                )
+                apply_q!(transformed, Fblocked; trans=:T)
+                transformed_leading = transformed[1:40, :]
+                @test maximum(abs, tril(transformed_leading, -1)) <=
+                    tolerance(T, 512 * size(blocked_source, 1))
+                @test max_relative_error(
+                    triu(transformed_leading),
+                    triu(factor_matrix(Fblocked)[1:40, :]),
+                ) <= tolerance(T, 512 * size(blocked_source, 1))
+                Rblocked = qr_explicit_r(Fblocked)
+                permuted_source =
+                    blocked_source[:, factor_permutation(Fblocked)]
+                @test max_relative_error(
+                    transpose(Rblocked) * Rblocked,
+                    transpose(permuted_source) * permuted_source,
+                ) <= tolerance(T, 512 * size(blocked_source, 1))
+
                 # Scaled sum-of-squares pivot norms avoid squaring these
                 # extreme column scales directly.
                 scaled = T.(randn(10, 4))
@@ -765,6 +925,96 @@ include("adversarial.jl")
                 Fbad = rrqr!(copy(nonfinite); check=false)
                 @test !MultiFloatLinearAlgebra.issuccess(Fbad)
                 @test factor_status(Fbad) == -1
+            end
+
+            @testset "blocked RRQR adversarial stress" begin
+                # Keep this panel just above the blocked crossover.  The
+                # matrices are deterministic and small enough for CI while
+                # still exercising several delayed panels.
+                rows, columns = 256, 64
+                thread_four = min(4, Threads.nthreads())
+                workspace = MFWorkspace(
+                    T;
+                    factor_capacity=columns,
+                    thread_count=thread_four,
+                )
+                for kind in (:near_tie, :cancellation, :rank_deficient, :extreme_scale)
+                    source = blocked_rrqr_adversarial_matrix(
+                        T, kind; rows=rows, columns=columns,
+                    )
+                    blocked_serial = rrqr!(copy(source); threads=1)
+                    blocked_threaded = rrqr!(
+                        copy(source); threads=thread_four,
+                    )
+                    blocked_reused = rrqr!(
+                        copy(source);
+                        threads=thread_four,
+                        workspace=workspace,
+                    )
+                    reference_factors, reference_tau, reference_permutation =
+                        qr_unblocked_reference(source)
+
+                    # Threading and caller-owned workspace must not alter the
+                    # compact factor, permutation, or Householder scalars.
+                    @test factor_matrix(blocked_threaded) ==
+                        factor_matrix(blocked_serial)
+                    @test blocked_threaded.tau == blocked_serial.tau
+                    @test factor_permutation(blocked_threaded) ==
+                        factor_permutation(blocked_serial)
+                    @test factor_matrix(blocked_reused) ==
+                        factor_matrix(blocked_threaded)
+                    @test blocked_reused.tau == blocked_threaded.tau
+                    @test factor_permutation(blocked_reused) ==
+                        factor_permutation(blocked_threaded)
+                    @test sort(factor_permutation(blocked_threaded)) ==
+                        collect(1:columns)
+                    @test sort(reference_permutation) == collect(1:columns)
+
+                    rank_rtol = kind === :rank_deficient ? sqrt(eps(T)) : zero(T)
+                    blocked_rank = numerical_rank(
+                        blocked_threaded; rtol=rank_rtol,
+                    )
+                    reference_rank = qr_reference_rank(
+                        reference_factors; rtol=rank_rtol,
+                    )
+                    @test blocked_rank == reference_rank
+                    if kind === :rank_deficient
+                        @test blocked_rank == 30
+                    end
+
+                    # Q' A[:,p] must be triangular and agree with the
+                    # compact R storage.  Scaling by the largest source
+                    # entry keeps the extreme-scale case meaningful.
+                    permuted = source[:, factor_permutation(blocked_threaded)]
+                    apply_q!(permuted, blocked_threaded; trans=:T)
+                    leading = permuted[1:min(rows, columns), :]
+                    source_scale = max(one(T), maximum(abs, source))
+                    residual_scale = T(8192 * max(rows, columns)) * eps(T)
+                    @test maximum(abs, tril(leading, -1)) / source_scale <=
+                        residual_scale
+                    compact_r = qr_explicit_r(blocked_threaded)
+                    @test max_relative_error(
+                        triu(leading),
+                        triu(compact_r[1:min(rows, columns), :]),
+                    ) <= tolerance(T, 8192 * max(rows, columns))
+
+                    reference_permuted = source[:, reference_permutation]
+                    qr_reference_apply_qt!(
+                        reference_permuted, reference_factors, reference_tau,
+                    )
+                    @test maximum(
+                        abs, tril(reference_permuted[1:min(rows, columns), :], -1),
+                    ) / source_scale <= residual_scale
+
+                    # The Gram matrix is a permutation-invariant check on the
+                    # reconstructed R, catching silent delayed-update errors
+                    # even when the pivot order differs at a near tie.
+                    @test max_relative_error(
+                        transpose(compact_r) * compact_r,
+                        transpose(source[:, factor_permutation(blocked_threaded)]) *
+                        source[:, factor_permutation(blocked_threaded)],
+                    ) <= tolerance(T, 8192 * max(rows, columns))
+                end
             end
 
             @testset "cholesky!" begin
@@ -2058,6 +2308,57 @@ include("adversarial.jl")
                 @test factor_permutation(qr_borrowed) ==
                     factor_permutation(qr_owned)
                 @test factor_rdiag(qr_borrowed) == factor_rdiag(qr_owned)
+
+                # Reusing a workspace for a smaller blocked panel must ignore
+                # stale norm flags beyond the current column count.  The
+                # workspace deliberately retains capacity after the large
+                # factorization; force its unused tail dirty to exercise the
+                # bound in _qr_has_unreliable_trailing_norm.
+                shrink_large = Matrix{T}(undef, 500, 48)
+                for column in axes(shrink_large, 2),
+                    row in axes(shrink_large, 1)
+                    shrink_large[row, column] = T(
+                        sin(row * 0.013 + column * 0.41) +
+                        0.07 * cos(row * 0.002 * column),
+                    )
+                end
+                shrink_small = shrink_large[:, 1:40]
+                shrink_reference = rrqr!(
+                    copy(shrink_small); threads=1,
+                )
+                shrink_workspace = MFWorkspace(T; thread_count=4)
+                rrqr!(
+                    copy(shrink_large);
+                    threads=4,
+                    workspace=shrink_workspace,
+                )
+                @inbounds for column in 41:48
+                    shrink_workspace.qr_norm_dirty[column] = true
+                end
+                @test MultiFloatLinearAlgebra._qr_has_unreliable_trailing_norm(
+                    shrink_workspace.qr_norm_dirty, 41, 40,
+                ) == false
+                @test MultiFloatLinearAlgebra._qr_has_unreliable_trailing_norm(
+                    shrink_workspace.qr_norm_dirty, 41,
+                ) == true
+                shrink_reused_1 = rrqr!(
+                    copy(shrink_small);
+                    threads=1,
+                    workspace=shrink_workspace,
+                )
+                shrink_reused_4 = rrqr!(
+                    copy(shrink_small);
+                    threads=4,
+                    workspace=shrink_workspace,
+                )
+                @test factor_matrix(shrink_reused_1) ==
+                    factor_matrix(shrink_reference)
+                @test factor_permutation(shrink_reused_1) ==
+                    factor_permutation(shrink_reference)
+                @test factor_matrix(shrink_reused_4) ==
+                    factor_matrix(shrink_reused_1)
+                @test factor_permutation(shrink_reused_4) ==
+                    factor_permutation(shrink_reused_1)
 
                 # Every returned factor owns its required metadata. Reusing
                 # the same workspace leaves all live factors valid.
