@@ -2841,3 +2841,4 @@ include("adversarial.jl")
         )
     end
 end
+include("qr_fixed_permutation.jl")

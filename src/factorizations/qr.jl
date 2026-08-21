@@ -747,6 +747,60 @@ function qr!(
 end
 
 """
+    qr!(A, permutation; check=true, workspace=nothing, threads=nthreads())
+
+Factor the columns of `A` in a caller-supplied order.
+
+`permutation[i] = j` means factor column `i` is original column `j`; the
+columns of `A` are physically reordered in place (the same destructive
+contract as the unpivoted entry point), and the returned factor records
+`permutation` so pivoted-style solves and `factor_permutation` consumers see
+the original column identity. Deterministic fixed-order route for callers
+that already know a good column order -- no norm search, no swaps.
+"""
+function qr!(
+    A::AbstractMatrix{MF},
+    permutation::AbstractVector{<:Integer};
+    check::Bool=true,
+    workspace::Union{Nothing,MFWorkspace{MF}}=nothing,
+    threads::Int=Threads.nthreads(),
+) where {MF<:MultiFloat}
+    _check_supported(MF)
+    Base.require_one_based_indexing(A)
+    m, n = size(A)
+    length(permutation) == n || throw(DimensionMismatch(
+        "permutation length $(length(permutation)) does not match $n columns",
+    ))
+    seen = falses(n)
+    @inbounds for j in eachindex(permutation)
+        column = Int(permutation[j])
+        1 <= column <= n || throw(ArgumentError(
+            "permutation entry $column is outside 1:$n",
+        ))
+        seen[column] && throw(ArgumentError(
+            "permutation repeats column $column",
+        ))
+        seen[column] = true
+    end
+    # Physically reorder the columns into the requested order, then run the
+    # unpivoted core on the reordered panel. The factor's permutation is the
+    # caller's order, so pivoted-style solves recover original identities.
+    ordered = A[:, Int.(permutation)]
+    copyto!(A, ordered)
+    factor = qr!(A; check=check, workspace=workspace, threads=threads)
+    # MFQR is immutable and the unpivoted core records the identity
+    # permutation; rebuild the factor with the caller's column identities so
+    # pivoted-style solves recover original columns.
+    return MFQR(
+        factor.factors,
+        factor.tau,
+        Int.(permutation),
+        _qr_permutation_cycle_leaders!(Int.(permutation)),
+        factor.info,
+    )
+end
+
+"""
     numerical_rank(F::MFQR; atol=0, rtol=0) -> Int
 
 Evaluate the leading numerical rank using the caller's nonnegative absolute
