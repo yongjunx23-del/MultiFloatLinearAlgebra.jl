@@ -204,6 +204,7 @@ end
 
 include("mulacc_x3_proof_vectors.jl")
 include("adversarial.jl")
+include("cholesky_pivoted.jl")
 include("qr_delayed_norm.jl")
 
 @testset "MultiFloatLinearAlgebra" begin

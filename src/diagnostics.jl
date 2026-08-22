@@ -50,6 +50,27 @@ function factor_diagnostics(F::MFCholesky{MF}) where {MF<:MultiFloat}
     )
 end
 
+function factor_diagnostics(F::MFCholeskyPivoted{MF}) where {MF<:MultiFloat}
+    accepted = F.rank
+    minimum_diagonal, maximum_diagonal =
+        _diagonal_magnitude_range(F.factors, accepted)
+    return (
+        kind=:cholesky_pivoted,
+        status=F.info,
+        state=factor_state(F),
+        success=issuccess(F),
+        precision=factor_precision(F),
+        provider=factor_provider(F),
+        failure_location=F.info > 0 ? F.info : nothing,
+        rank=accepted,
+        permutation=copy(F.permutation),
+        minimum_diagonal=minimum_diagonal,
+        maximum_diagonal=maximum_diagonal,
+        diagonal_spread=_optional_spread(minimum_diagonal, maximum_diagonal),
+        finite=_lower_triangle_finite(F.factors),
+    )
+end
+
 function _lu_maximum_u(F::MFLU{MF}) where {MF<:MultiFloat}
     maximum_value = zero(MF)
     rows, columns = size(F.factors)
