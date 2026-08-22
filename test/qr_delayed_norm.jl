@@ -66,4 +66,27 @@ using MultiFloatLinearAlgebra
     permuted = source[:, factor_permutation(threaded)]
     apply_q!(permuted, threaded; trans=:T)
     @test maximum(abs, tril(permuted[1:40, :], -1)) <= T(1e-50)
+
+    # Regression for cancellation-sensitive rank reveal: omitting the
+    # current reflector from the exact delayed norm rebuild reports rank 2
+    # instead of the true rank 30 on this deterministic duplicated-column
+    # panel.  The current reflector row must be included in Ftranspose.
+    rows, columns, true_rank = 256, 64, 30
+    deficient = zeros(T, rows, columns)
+    core = zeros(T, rows, true_rank)
+    for column in axes(core, 2), row in axes(core, 1)
+        core[row, column] = T(
+            sin(0.013 * row + 0.23 * column) +
+            0.21 * cos(0.005 * row * column),
+        )
+    end
+    deficient[:, 1:true_rank] .= core
+    deficient[:, 31:40] .= core[:, 2:11]
+    deficient_factor = rrqr!(copy(deficient); threads=2)
+    @test numerical_rank(
+        deficient_factor; rtol=sqrt(eps(T)),
+    ) == true_rank
+    deficient_permuted = deficient[:, factor_permutation(deficient_factor)]
+    apply_q!(deficient_permuted, deficient_factor; trans=:T)
+    @test maximum(abs, tril(deficient_permuted[1:columns, :], -1)) <= T(1e-50)
 end

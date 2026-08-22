@@ -564,7 +564,7 @@ function _rrqr_blocked!(
             _qr_update_norm_state!(
                 A, tau[step], step, norm_scale, norm_sum, norm_dirty,
                 norm_reliability_floor, Ftranspose, block_start,
-                local_step - 1,
+                local_step,
             )
             actual = local_step
 
