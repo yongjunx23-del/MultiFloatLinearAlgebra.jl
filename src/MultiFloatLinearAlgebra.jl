@@ -20,6 +20,7 @@ include("kernels/trsv.jl")
 include("kernels/trmm.jl")
 include("kernels/symv.jl")
 include("factorizations/cholesky.jl")
+include("factorizations/cholesky_pivoted.jl")
 include("factorizations/lu.jl")
 include("factorizations/ldlt.jl")
 include("factorizations/qr.jl")
@@ -40,7 +41,8 @@ export AbstractMFFactorization, factor_status, factor_kind, factor_matrix
 export factor_state, factor_precision, factor_provider, factor_diagnostics
 export factor_pivots, factor_blocks, factor_permutation, factor_inertia
 export factor_rdiag, numerical_rank
-export MFCholesky, MFLU, MFLDLT, MFQR, cholesky!, lu!, ldlt!, qr!, rrqr!, issuccess
+export MFCholesky, MFCholeskyPivoted, MFLU, MFLDLT, MFQR
+export cholesky!, cholesky_pivoted!, lu!, ldlt!, qr!, rrqr!, issuccess
 export apply_q!, solve_r!
 export ldiv!, solve
 export residual!, residual_mixed!, normwise_backward_error, refinement_correction!
