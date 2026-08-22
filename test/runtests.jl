@@ -204,6 +204,7 @@ end
 
 include("mulacc_x3_proof_vectors.jl")
 include("adversarial.jl")
+include("qr_delayed_norm.jl")
 
 @testset "MultiFloatLinearAlgebra" begin
     for T in (Float64x2, Float64x3, Float64x4)

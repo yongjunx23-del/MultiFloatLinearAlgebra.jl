@@ -220,6 +220,47 @@ function _qr_select_pivot_hybrid!(
     return pivot
 end
 
+# Exact column norm with the current panel's delayed prefix corrections
+# (DLAQPS).  The bottom update is not applied yet, so the effective column
+# value at row r is A[r, c] - sum_prior A[r, b+prior-1] * F[prior, c].
+function _qr_delayed_column_norm_state(
+    A::AbstractMatrix{MF},
+    Ftranspose::Union{Nothing,AbstractMatrix{MF}},
+    block_start::Int,
+    prior_count::Int,
+    first_row::Int,
+    column::Int,
+) where {MF<:MultiFloat}
+    scale = zero(MF)
+    scaled_sum = one(MF)
+    nonzero_seen = false
+    @inbounds for row in first_row:size(A, 1)
+        value = A[row, column]
+        if Ftranspose !== nothing
+            for prior in 1:prior_count
+                value -= A[row, block_start + prior - 1] *
+                         Ftranspose[prior, column]
+            end
+        end
+        magnitude = abs(value)
+        if !iszero(magnitude)
+            if !nonzero_seen
+                scale = magnitude
+                scaled_sum = one(MF)
+                nonzero_seen = true
+            elseif magnitude > scale
+                ratio = scale / magnitude
+                scaled_sum = one(MF) + scaled_sum * ratio * ratio
+                scale = magnitude
+            else
+                ratio = magnitude / scale
+                scaled_sum += ratio * ratio
+            end
+        end
+    end
+    return scale, scaled_sum
+end
+
 function _qr_update_norm_state!(
     A::AbstractMatrix{MF},
     tau::MF,
@@ -228,6 +269,9 @@ function _qr_update_norm_state!(
     scaled_sum::AbstractVector{MF},
     dirty::AbstractVector{Bool},
     reliability_floor::MF,
+    Ftranspose::Union{Nothing,AbstractMatrix{MF}},
+    block_start::Int,
+    prior_count::Int,
 ) where {MF<:MultiFloat}
     iszero(tau) && return nothing
     @inbounds for column in (step + 1):size(A, 2)
@@ -241,7 +285,14 @@ function _qr_update_norm_state!(
         ratio = removed / current_scale
         new_sum = scaled_sum[column] - ratio * ratio
         if !isfinite(new_sum) || new_sum <= reliability_floor
-            dirty[column] = true
+            # Downdate overshoot: the stored scale/sum no longer describe the
+            # column after the delayed prefix. Rebuild this column's exact
+            # norm inline (including Ftranspose corrections) instead of
+            # forcing a full panel break and O(rows*columns) rebuild.
+            scale[column], scaled_sum[column] = _qr_delayed_column_norm_state(
+                A, Ftranspose, block_start, prior_count, step + 1, column,
+            )
+            dirty[column] = false
         else
             scaled_sum[column] = new_sum
         end
@@ -340,7 +391,7 @@ function _rrqr_unblocked!(
         _qr_apply_reflector_to_trailing!(A, tau[step], step, threads)
         _qr_update_norm_state!(
             A, tau[step], step, norm_scale, norm_sum, norm_dirty,
-            norm_reliability_floor,
+            norm_reliability_floor, nothing, step, 0,
         )
     end
     return nothing
@@ -512,7 +563,8 @@ function _rrqr_blocked!(
 
             _qr_update_norm_state!(
                 A, tau[step], step, norm_scale, norm_sum, norm_dirty,
-                norm_reliability_floor,
+                norm_reliability_floor, Ftranspose, block_start,
+                local_step - 1,
             )
             actual = local_step
 
