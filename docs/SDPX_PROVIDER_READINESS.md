@@ -120,6 +120,42 @@ vector/multi-RHS solves, numerical diagnostics, residual/backward error,
 explicit promoted residual, one requested correction, workspace reuse, and
 capability facts are present and adversarially tested.
 
+## Reusable factor-cache and LinearSolve provider readiness
+
+The factor-cache layer (`AbstractMFFactorCache` and
+`MFCholeskyCache`/`MFLUCache`/`MFLDLTCache`/`MFRRQRCache`) adds the reusable,
+low-allocation route solver code needs without touching the safe standalone
+factor API. See [`FACTOR_CACHE.md`](FACTOR_CACHE.md) for the full API and
+lifecycle.
+
+Solver-facing facts for SDPX:
+
+- **Reusable factor storage.** A cache owns its factor matrix and metadata.
+  Repeated `factorize!` never grows owned storage; repeated vector `solve!`
+  allocates 0 bytes. `A` value updates reuse storage; size growth is explicit
+  through `prepare!`.
+- **Explicit reserve for pre-allocation.** `workspace_requirements` and
+  `factor_cache_requirements` are pure queries SDPX can call once, before any
+  numerical work, to reserve every array the warm path needs.
+- **Borrowed, not persistent.** Cache factors are borrowed and invalidated by
+  the next `factorize!`. SDPX must not treat a cache factor as a long-lived
+  object; it keeps the standalone factor API for that.
+- **No solver policy in MFLA.** The cache does not choose rank, refinement
+  count, precision policy, or fallback. A failed cache is queryable and
+  recoverable by re-factorizing a replacement `A`; MFLA never silently falls
+  back.
+
+MFLA also exposes an optional LinearSolve.jl extension (`MultiFloatLU`,
+`MultiFloatCholesky`, loaded by `using LinearSolve`). LinearSolve remains a weak
+dependency and never enters the MFLA core. The extension's `LinearCache` holds
+an MFLA factor cache: an unchanged `A` reuses the numeric factor across RHS
+updates (0-byte RHS-reuse solve), an `A` update re-factorizes into existing
+storage, `init` performs no double numerical factorization, and a failed
+factorization reports `ReturnCode.Failure` while leaving the cache fresh so a
+caller can replace `A` and retry. This is a concrete, tested path SDPX can use
+to drive dense MultiFloat solves through the standard SciML interface without
+re-implementing factor caching.
+
 It is not, and should not become, a complete SDPX kernel namespace. SDPX still
 requires its solver-specific sparse assembly, Q3/SOC algebra, iterate updates,
 line search, precision/fallback orchestration, and certification code.

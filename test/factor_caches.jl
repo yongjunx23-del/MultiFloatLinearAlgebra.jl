@@ -2,7 +2,8 @@
 import MultiFloatLinearAlgebra
 using MultiFloatLinearAlgebra: MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache,
     prepare!, factorize!, solve!, invalidate!, factor_status, factor_diagnostics,
-    factor_kind, factor_state, issuccess, factor_matrix
+    factor_kind, factor_state, issuccess, factor_matrix,
+    workspace_requirements, factor_cache_requirements
 
 const MFLA = MultiFloatLinearAlgebra
 
@@ -192,4 +193,85 @@ end
     @test d.success == true
     @test d.status == 0
     @test length(d.pivots) == 8
+end
+
+@testset "factor cache numerical correctness (pathological/singular/nonfinite)" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+
+            # singular LU -> failure status, not throw with check=false
+            s = T[1 2; 2 4]
+            lc = MFLUCache(T; config=cfg)
+            prepare!(lc, 2)
+            factorize!(lc, s; check=false)
+            @test !issuccess(lc)
+            @test factor_status(lc) != 0
+            @test_throws LinearAlgebra.SingularException solve!(zeros(T, 2), lc, T[1, 2])
+            # after replacing with a nonsingular matrix in-place, refactorize recovers
+            good = T[4 1; 1 3]
+            factorize!(lc, good; check=false)
+            @test issuccess(lc)
+            x = zeros(T, 2)
+            solve!(x, lc, T[5, 4])
+            @test max_relative_error(x, MFLA.ldiv!(copy(T[5, 4]), MFLA.lu!(copy(good); check=false, config=cfg), T[5, 4])) <= tolerance(T, 16)
+
+            # nonfinite input -> -1 status with check=false
+            nf = T[1 NaN; 0 1]
+            c = MFLUCache(T; config=cfg)
+            prepare!(c, 2)
+            factorize!(c, nf; check=false)
+            @test factor_status(c) == -1
+            @test factor_state(c) == :nonfinite_input
+            @test !issuccess(c)
+
+            # cholesky not-posdef
+            ind = T[1 2; 2 1]
+            cc = MFCholeskyCache(T; config=cfg)
+            prepare!(cc, 2)
+            factorize!(cc, ind; check=false)
+            @test !issuccess(cc)
+            @test factor_state(cc) == :not_posdef
+            @test_throws LinearAlgebra.PosDefException solve!(zeros(T, 2), cc, T[1, 1])
+
+            # adjacent 2x2 LDLT pivots stay successful and solve correctly
+            adj = T[2 1 0 0; 1 0 1 0; 0 1 0 1; 0 0 1 2]
+            lc = MFLDLTCache(T; config=cfg)
+            prepare!(lc, 4)
+            factorize!(lc, adj; check=false)
+            @test issuccess(lc)
+            b = T[1, 2, 3, 4]
+            x = zeros(T, 4)
+            solve!(x, lc, b)
+            @test max_relative_error(x, MFLA.ldiv!(copy(b), MFLA.ldlt!(copy(adj); check=false, config=cfg), b)) <= tolerance(T, 256)
+
+            # aliasing: RHS === destination is allowed
+            luA = cache_diagdom(T, 4)
+            lc2 = MFLUCache(T; config=cfg)
+            prepare!(lc2, 4)
+            factorize!(lc2, luA)
+            y = T[1, 2, 3, 4]
+            src = copy(y)
+            solve!(y, lc2, y)
+            @test max_relative_error(y, MFLA.ldiv!(src, MFLA.lu!(copy(luA); check=false, config=cfg), src)) <= tolerance(T, 16)
+        end
+    end
+end
+
+@testset "factor cache pure requirements queries" begin
+    T = Float64x2
+    cfg = KernelConfig(thread_count=1)
+    # pure: repeated queries are identical and do not mutate any state
+    w0 = workspace_requirements(:lu, (n=64,), cfg)
+    w1 = workspace_requirements(:lu, (n=64,), cfg)
+    @test w0 == w1
+    @test w0.factor == 64
+    wg = workspace_requirements(:gemm, (m=64, k=64, n=64), cfg)
+    @test wg.gemm_capacity == 64 * max(cfg.gemm_panel_columns, 1)
+    r = factor_cache_requirements(:cholesky, (n=64,))
+    @test r.factor_matrix_elements == 64 * 64
+    rr = factor_cache_requirements(:rrqr, (m=64, n=48))
+    @test rr.matrix == (m=64, n=48)
+    @test_throws ArgumentError factor_cache_requirements(:bogus, (n=8,))
+    @test_throws ArgumentError workspace_requirements(:bogus, (n=8,), cfg)
 end

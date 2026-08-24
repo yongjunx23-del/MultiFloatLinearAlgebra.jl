@@ -126,6 +126,31 @@ See [`docs/SOLVER_BACKEND_CONTRACT.md`](docs/SOLVER_BACKEND_CONTRACT.md) and
 [`docs/SDPX_PROVIDER_READINESS.md`](docs/SDPX_PROVIDER_READINESS.md) for the
 more detailed backend contract.
 
+## Reusable factor cache
+
+For repeated factor/solve cycles, the factor-cache layer
+(`MFCholeskyCache`, `MFLUCache`, `MFLDLTCache`, `MFRRQRCache`) owns every
+factorization array, so the warm hot path allocates nothing of its own:
+
+```julia
+using MultiFloatLinearAlgebra, MultiFloats
+cache = MFLUCache(Float64x2)
+prepare!(cache, n)          # explicit reserve (allocates)
+factorize!(cache, A)        # reuses owned storage, no matrix copy
+solve!(x, cache, b)         # 0-byte warm vector solve; repeated RHS is free
+factorize!(cache, A2)       # same size: only overwrites storage
+invalidate!(cache)          # explicit refresh marker after mutating A in place
+```
+
+`prepare!` is the only growth point; the factorization hot path never silently
+resizes. Cache factors are borrowed and invalidated by the next `factorize!`.
+Pure `workspace_requirements` / `factor_cache_requirements` queries let callers
+reserve all storage before any numerical work.
+
+See [`docs/FACTOR_CACHE.md`](docs/FACTOR_CACHE.md) for the full API and
+lifecycle, and [`docs/FACTOR_CACHE_REPORT.md`](docs/FACTOR_CACHE_REPORT.md) for
+the allocation before/after and accuracy results.
+
 ## Testing
 
 ```julia
