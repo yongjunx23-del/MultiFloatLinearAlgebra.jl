@@ -127,6 +127,32 @@ function invalidate!(cache::AbstractMFFactorCache)
     return cache
 end
 
+# The frozen-config contract: a cache's configuration is fixed at setup and
+# must be changed only through `reconfigure!` + `prepare!`. The hot path
+# (`factorize!`/`solve!`) rejects any config that differs from the frozen one.
+@inline function _check_config_frozen(cache::AbstractMFFactorCache, config::KernelConfig)
+    config == cache.config && return nothing
+    throw(ArgumentError(
+        "factor cache config is frozen; call reconfigure!(cache, new_config) then " *
+        "prepare!(cache, dims) instead of passing a different config to the hot path",
+    ))
+    return nothing
+end
+
+"""
+    reconfigure!(cache, new_config)
+
+Replace the cache's frozen `KernelConfig`. This invalidates the cache (storage
+is unchanged) and the caller must run `prepare!` again before any warm
+`factorize!`/`solve!`, because a changed config can require larger GEMM/LDLT
+workspace. The hot path never accepts a config that differs from this one.
+"""
+function reconfigure!(cache::AbstractMFFactorCache, new_config::KernelConfig)
+    cache.config = new_config
+    cache.status = _FACTOR_CACHE_INVALID
+    return cache
+end
+
 factor_kind(::MFCholeskyCache) = :cholesky
 factor_status(cache::MFCholeskyCache) = cache.status
 factor_matrix(cache::MFCholeskyCache) = cache.factors

@@ -336,3 +336,31 @@ end
         end
     end
 end
+
+@testset "factor cache frozen config and reconfigure!" begin
+    T = Float64x2
+    n = 8
+    cfg = KernelConfig(thread_count=1)
+    cfg2 = KernelConfig(thread_count=2, gemm_strategy=:packed, gemm_panel_columns=4)
+    A = cache_diagdom(T, n)
+    c = MFLUCache(T; config=cfg)
+    prepare!(c, n)
+    factorize!(c, A)
+    @test issuccess(c)
+    # hot path rejects a divergent config
+    @test_throws ArgumentError factorize!(c, A; config=cfg2)
+    @test_throws ArgumentError solve!(zeros(T, n), c, T.(randn(n)); config=cfg2)
+    # reconfigure! invalidates and, with prepare!, makes the new config the frozen one
+    reconfigure!(c, cfg2)
+    @test !issuccess(c)
+    prepare!(c, n)
+    factorize!(c, A)
+    @test issuccess(c)
+    @test c.config.thread_count == 2
+    # cholesky config frozen too
+    spd = cache_spd(T, n)
+    cc = MFCholeskyCache(T; config=cfg)
+    prepare!(cc, n)
+    factorize!(cc, spd)
+    @test_throws ArgumentError factorize!(cc, spd; config=cfg2)
+end

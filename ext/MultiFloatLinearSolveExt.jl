@@ -44,14 +44,16 @@ function _multifloat_matrix(A)
 end
 
 # A fresh empty cache supplies the fixed `cacheval` field type without running
-# the real O(n^3) factorization during `init`. Storage is grown inside `_solve!`
-# on the first (or size-changing) factorization and reused thereafter.
+# the real O(n^3) factorization during `init`. It is constructed with the
+# algorithm's frozen config so the hot path never sees a divergent config.
+# Storage is grown inside `_solve!` on the first (or size-changing)
+# factorization and reused thereafter.
 function _empty_cache(alg::Union{MultiFloatLU,MultiFloatCholesky}, A)
     MF = eltype(_multifloat_matrix(A))
     if alg isa MultiFloatLU
-        return MFLA.MFLUCache(MF)
+        return MFLA.MFLUCache(MF; config=alg.config)
     end
-    return MFLA.MFCholeskyCache(MF)
+    return MFLA.MFCholeskyCache(MF; config=alg.config)
 end
 
 function LinearSolve.init_cacheval(

@@ -36,6 +36,7 @@ function factorize!(
     check::Bool=true,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     n = size(A, 1)
     n == size(A, 2) || throw(DimensionMismatch("cholesky cache requires a square matrix"))
     _check_supported(MF)
@@ -70,6 +71,7 @@ function solve!(
     source::AbstractVector{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.PosDefException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source)
     n = size(cache.factors, 1)
@@ -88,6 +90,7 @@ function solve!(
     source::AbstractMatrix{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.PosDefException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source, cache.factors)
     size(destination) == size(source) || throw(DimensionMismatch("source and destination dimensions differ"))
@@ -132,6 +135,7 @@ function factorize!(
     check::Bool=true,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     m, n = size(A)
     _check_supported(MF)
     Base.require_one_based_indexing(A)
@@ -153,6 +157,7 @@ function solve!(
     source::AbstractVector{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.SingularException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source)
     n = size(cache.factors, 1)
@@ -173,6 +178,7 @@ function solve!(
     source::AbstractMatrix{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.SingularException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source, cache.factors)
     size(destination) == size(source) || throw(DimensionMismatch("source and destination dimensions differ"))
@@ -230,6 +236,7 @@ function factorize!(
     check::Bool=true,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     n = size(A, 1)
     n == size(A, 2) || throw(DimensionMismatch("ldlt cache requires a square matrix"))
     _check_supported(MF)
@@ -361,6 +368,7 @@ function solve!(
     source::AbstractVector{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.SingularException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source, cache.factors)
     n = size(cache.factors, 1)
@@ -377,6 +385,7 @@ function solve!(
     source::AbstractMatrix{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     issuccess(cache) || throw(LinearAlgebra.SingularException(factor_status(cache)))
     Base.require_one_based_indexing(destination, source, cache.factors)
     size(destination) == size(source) || throw(DimensionMismatch("source and destination dimensions differ"))
@@ -449,6 +458,7 @@ function factorize!(
     threads::Int=cache.config.thread_count,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     m, n = size(A)
     _check_supported(MF)
     Base.require_one_based_indexing(A)
@@ -621,6 +631,7 @@ function solve!(
     source::AbstractVector{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     n = _cache_qr_square_check(destination, cache)
     length(source) == n || throw(DimensionMismatch("right-hand side length differs"))
     _check_no_alias(destination, cache.factors)
@@ -637,6 +648,7 @@ function solve!(
     source::AbstractMatrix{MF};
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
     n = _cache_qr_square_check(destination, cache)
     size(destination) == size(source) || throw(DimensionMismatch("source and destination dimensions differ"))
     size(destination, 1) == n || throw(DimensionMismatch("right-hand side dimensions differ"))
