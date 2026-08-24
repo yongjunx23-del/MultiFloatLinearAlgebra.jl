@@ -145,7 +145,7 @@ function factorize!(
     invalidate!(cache)
     copyto!(cache.factors, A)
     cache.original_maximum = _maximum_abs(cache.factors)
-    status = _lu_factorize_core!(cache.factors, cache.ipiv, config, false, cache.gemm)
+    status = _lu_factorize_core_viewfree!(cache.factors, cache.ipiv, config, false)
     cache.status = status
     check && !iszero(status) && throw(LinearAlgebra.SingularException(status))
     return cache
@@ -256,11 +256,22 @@ function factorize!(
     return cache
 end
 
+# LDLT forward/backward triangular solves: vector destinations use trsv!, matrix
+# destinations use trsm! (the standalone LDLT solve does the same).
+@inline function _ldlt_tri_solve!(destination::AbstractVector{MF}, factors, trans::Symbol, config) where {MF<:MultiFloat}
+    trsv!(destination, factors; uplo=:lower, trans=trans, diag=:unit, config=config)
+    return destination
+end
+@inline function _ldlt_tri_solve!(destination::AbstractMatrix{MF}, factors, trans::Symbol, config) where {MF<:MultiFloat}
+    trsm!(destination, factors; side=:left, uplo=:lower, trans=trans, diag=:unit, config=config)
+    return destination
+end
+
 function _ldlt_cache_solve!(destination, cache::MFLDLTCache{MF}, config::KernelConfig) where {MF<:MultiFloat}
     _ldlt_cache_apply_forward!(destination, cache)
-    trsv!(destination, cache.factors; uplo=:lower, trans=:N, diag=:unit, config=config)
+    _ldlt_tri_solve!(destination, cache.factors, :N, config)
     _ldlt_cache_solve_d!(destination, cache)
-    trsv!(destination, cache.factors; uplo=:lower, trans=:T, diag=:unit, config=config)
+    _ldlt_tri_solve!(destination, cache.factors, :T, config)
     _ldlt_cache_apply_reverse!(destination, cache)
     return destination
 end
@@ -618,6 +629,31 @@ function _cache_permute_qr_solution!(destination, cache::MFRRQRCache{MF}) where 
             end
             next_value = destination[target]
             destination[target] = value
+            value = next_value
+            current = target
+        end
+    end
+    return destination
+end
+
+# Matrix-destination QR solution permutation: apply the column permutation to
+# each right-hand-side column independently (mirrors the standalone
+# `_permute_qr_solution!` matrix path, which the linear-index vector path would
+# corrupt because a Matrix is column-major).
+function _cache_permute_qr_solution!(destination::AbstractMatrix{MF}, cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
+    leaders = cache.cycle_leaders
+    @inbounds for column in axes(destination, 2), c in 1:cache.cycle_count
+        start = leaders[c]
+        value = destination[start, column]
+        current = start
+        while true
+            target = cache.permutation[current]
+            if target == start
+                destination[target, column] = value
+                break
+            end
+            next_value = destination[target, column]
+            destination[target, column] = value
             value = next_value
             current = target
         end

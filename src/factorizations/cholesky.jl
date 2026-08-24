@@ -86,10 +86,8 @@ function _cholesky_factorize_core!(
             return info
         end
         if last < n
-            _solve_cholesky_panel!(A, first, last, config)
-            trailing = @view A[(last + 1):n, (last + 1):n]
-            panel = transpose(@view A[(last + 1):n, first:last])
-            syrk!(trailing, panel, -one(MF), one(MF); uplo=:lower, config=config)
+            _cholesky_panel_trsm!(A, first, last)
+            _cholesky_trailing_syrk!(A, first, last)
         end
     end
     return info

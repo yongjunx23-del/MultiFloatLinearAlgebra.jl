@@ -48,3 +48,7 @@ jobs:
         run: julia -t 1 --project=. benchmark/allocation_audit.jl 64
       - name: Run factor-cache allocation audit
         run: julia -t 1 --project=. benchmark/factor_cache_audit.jl 64
+      - name: Run allocation regression gate (hard)
+        # Fails the workflow on nonzero exit if any warm-path measurement
+        # exceeds its baked regression limit. See benchmark/allocation_gate.jl.
+        run: julia -t 1 --project=. benchmark/allocation_gate.jl --check
