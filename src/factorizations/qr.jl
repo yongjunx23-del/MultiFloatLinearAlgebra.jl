@@ -626,22 +626,29 @@ function _rrqr_blocked!(
 
         block_end = block_start + actual - 1
         if block_end < rows && block_end < columns
-            gemm!(
-                view(
-                    A,
-                    (block_end + 1):rows,
-                    (block_end + 1):columns,
-                ),
-                view(A, (block_end + 1):rows, block_start:block_end),
-                view(
-                    Ftranspose,
-                    1:actual,
-                    (block_end + 1):columns,
-                ),
-                -one(MF), one(MF);
-                config=kernel_config,
-                workspace=_qr_gemm_workspace(workspace),
-            )
+            if workspace isa MFRRQRCache
+                # Cache-owned ftranspose + view-free trailing GEMM: zero allocation.
+                _rrqr_trailing_gemm_viewfree!(
+                    A, block_start, block_end, workspace.ftranspose, actual, columns,
+                )
+            else
+                gemm!(
+                    view(
+                        A,
+                        (block_end + 1):rows,
+                        (block_end + 1):columns,
+                    ),
+                    view(A, (block_end + 1):rows, block_start:block_end),
+                    view(
+                        Ftranspose,
+                        1:actual,
+                        (block_end + 1):columns,
+                    ),
+                    -one(MF), one(MF);
+                    config=kernel_config,
+                    workspace=_qr_gemm_workspace(workspace),
+                )
+            end
         end
         _qr_recompute_norm_columns_parallel!(
             A, norm_scale, norm_sum, norm_dirty,

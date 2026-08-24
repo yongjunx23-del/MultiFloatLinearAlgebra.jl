@@ -673,7 +673,7 @@ function _ldlt_factorize_core!(
 
     alpha = (one(MF) + sqrt(MF(17))) / MF(8)
     info = if plan.strategy === :blocked
-        _factor_ldlt_blocked!(A, dsub, pivots, blocks, weighted, alpha, plan, config)
+        _ldlt_factorize_blocked_viewfree!(A, dsub, pivots, blocks, weighted, alpha, plan, config)
     else
         _factor_ldlt_unblocked!(A, dsub, pivots, blocks, alpha)
     end

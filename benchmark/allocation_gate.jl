@@ -54,7 +54,7 @@ const BASELINE = Dict{Tuple{Symbol,Int},Int}(
     (:cholesky_solve_vec, 2) => 0,  (:cholesky_solve_vec, 3) => 0,  (:cholesky_solve_vec, 4) => 0,
     (:cholesky_solve_mat, 2) => 96, (:cholesky_solve_mat, 3) => 96, (:cholesky_solve_mat, 4) => 96,
     (:invalidate, 2) => 0,          (:invalidate, 3) => 0,          (:invalidate, 4) => 0,
-    (:lu_factorize, 2) => 912,      (:lu_factorize, 3) => 912,      (:lu_factorize, 4) => 1008,
+    (:lu_factorize, 2) => 0,       (:lu_factorize, 3) => 0,       (:lu_factorize, 4) => 0,
     (:lu_vector_solve, 2) => 0,     (:lu_vector_solve, 3) => 0,     (:lu_vector_solve, 4) => 0,
     (:lu_matrix_solve, 2) => 96,    (:lu_matrix_solve, 3) => 96,    (:lu_matrix_solve, 4) => 96,
     (:ldlt_factorize, 2) => 0,      (:ldlt_factorize, 3) => 0,      (:ldlt_factorize, 4) => 0,
@@ -65,18 +65,15 @@ const BASELINE = Dict{Tuple{Symbol,Int},Int}(
     # GEMM direct / forced-packed (with a prepared GemmWorkspace)
     (:gemm_direct, 2) => 64,        (:gemm_direct, 3) => 64,        (:gemm_direct, 4) => 96,
     (:gemm_packed, 2) => 128,       (:gemm_packed, 3) => 128,       (:gemm_packed, 4) => 160,
-    # blocked LDLT (ldlt_strategy=:blocked) and blocked RRQR (large n).
-    # NOTE: blocked LDLT factorize is not allocation-free on this branch; it
-    # allocates per call, and the amount depends on the pivot pattern of the
-    # fixed seeded matrix (deterministic within this script). The value below is
-    # the gate's own stable baseline, not a zero target.
-    (:ldlt_blocked_factorize, 2) => 23296, (:ldlt_blocked_factorize, 3) => 35840, (:ldlt_blocked_factorize, 4) => 63360,
+    # blocked LDLT (ldlt_strategy=:blocked) and blocked RRQR (large n):
+    # both factorize paths are now genuinely zero-allocation.
+    (:ldlt_blocked_factorize, 2) => 0,     (:ldlt_blocked_factorize, 3) => 0,     (:ldlt_blocked_factorize, 4) => 0,
     (:ldlt_blocked_solve_vec, 2) => 0,     (:ldlt_blocked_solve_vec, 3) => 0,     (:ldlt_blocked_solve_vec, 4) => 0,
-    (:rrqr_blocked_factorize, 2) => 1792,  (:rrqr_blocked_factorize, 3) => 1792,  (:rrqr_blocked_factorize, 4) => 2016,
+    (:rrqr_blocked_factorize, 2) => 0,     (:rrqr_blocked_factorize, 3) => 0,     (:rrqr_blocked_factorize, 4) => 0,
     (:rrqr_blocked_solve_vec, 2) => 0,     (:rrqr_blocked_solve_vec, 3) => 0,     (:rrqr_blocked_solve_vec, 4) => 0,
     # repeated same-size A refactor, and success/failure/recovery refactor
-    (:lu_repeated_refactor, 2) => 912,     (:lu_repeated_refactor, 3) => 912,     (:lu_repeated_refactor, 4) => 1008,
-    (:lu_recovery_refactor, 2) => 912,     (:lu_recovery_refactor, 3) => 912,     (:lu_recovery_refactor, 4) => 1008,
+    (:lu_repeated_refactor, 2) => 0,       (:lu_repeated_refactor, 3) => 0,       (:lu_repeated_refactor, 4) => 0,
+    (:lu_recovery_refactor, 2) => 0,       (:lu_recovery_refactor, 3) => 0,       (:lu_recovery_refactor, 4) => 0,
     (:chol_recovery_refactor, 2) => 0,     (:chol_recovery_refactor, 3) => 0,     (:chol_recovery_refactor, 4) => 0,
     (:ldlt_recovery_refactor, 2) => 0,     (:ldlt_recovery_refactor, 3) => 0,     (:ldlt_recovery_refactor, 4) => 0,
     (:rrqr_recovery_refactor, 2) => 0,     (:rrqr_recovery_refactor, 3) => 0,     (:rrqr_recovery_refactor, 4) => 0,
