@@ -31,6 +31,35 @@ include("solve.jl")
 include("residual.jl")
 include("capabilities.jl")
 
+function _linearsolve_extension()
+    extension = Base.get_extension(@__MODULE__, :MultiFloatLinearSolveExt)
+    extension === nothing && throw(ArgumentError(
+        "load LinearSolve before constructing a MultiFloat LinearSolve algorithm",
+    ))
+    return extension
+end
+
+"""
+    MultiFloatLU(; config=KernelConfig())
+
+Construct the optional LinearSolve.jl algorithm backed by MFLA's dense
+partial-pivoting LU factorization. Load `LinearSolve` before calling this
+constructor.
+"""
+function MultiFloatLU(; config::KernelConfig=KernelConfig())
+    return getproperty(_linearsolve_extension(), :MultiFloatLU)(config)
+end
+
+"""
+    MultiFloatCholesky(; config=KernelConfig())
+
+Construct the optional LinearSolve.jl algorithm backed by MFLA's dense lower
+Cholesky factorization. Load `LinearSolve` before calling this constructor.
+"""
+function MultiFloatCholesky(; config::KernelConfig=KernelConfig())
+    return getproperty(_linearsolve_extension(), :MultiFloatCholesky)(config)
+end
+
 export KernelConfig, GemmWorkspace, MFWorkspace
 export workspace_capacity, ensure_workspace_capacity!
 export GemmPlan, GemmProfile, GemmMeasurement, GemmCalibration, LDLTPlan
@@ -47,5 +76,6 @@ export apply_q!, solve_r!
 export ldiv!, solve
 export residual!, residual_mixed!, normwise_backward_error, refinement_correction!
 export capabilities
+export MultiFloatLU, MultiFloatCholesky
 
 end

@@ -45,6 +45,28 @@ F = MultiFloatLinearAlgebra.cholesky!(copy(Matrix(S)))
 x = solve(F, T.(randn(128)))
 ```
 
+### LinearSolve.jl integration
+
+Install and load `LinearSolve` to activate MFLA's optional package extension:
+
+```julia
+using LinearSolve
+using MultiFloats
+using MultiFloatLinearAlgebra
+
+T = Float64x4
+A = T[4 1; 1 3]
+b = T[1, 2]
+problem = LinearProblem(A, b)
+
+lu_solution = LinearSolve.solve(problem, MultiFloatLU())
+cholesky_solution = LinearSolve.solve(problem, MultiFloatCholesky())
+```
+
+Both algorithms accept `config=KernelConfig(...)`. A `LinearSolve.init` cache
+reuses its factorization when only the right-hand side changes; changing `A`
+marks the cache fresh and triggers a new factorization on the next solve.
+
 ## Main features
 
 - BLAS-like dense kernels: `gemv!`, `gemm!`, `syrk!`, `gemmt!`, `trsm!`,
@@ -111,7 +133,7 @@ using Pkg
 Pkg.test("MultiFloatLinearAlgebra")
 ```
 
-CI currently tests Julia 1.10, 1.11, and 1.12 on Linux and macOS.
+CI currently tests Julia 1.9, 1.10, 1.11, and 1.12 on Linux and macOS.
 
 ## Contributors and AI disclosure
 
