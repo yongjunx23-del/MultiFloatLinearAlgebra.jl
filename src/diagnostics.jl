@@ -80,6 +80,15 @@ function _lu_maximum_u(F::MFLU{MF}) where {MF<:MultiFloat}
     return maximum_value
 end
 
+function _lu_maximum_u(F::MFLUCache{MF}) where {MF<:MultiFloat}
+    maximum_value = zero(MF)
+    rows, columns = size(F.factors)
+    @inbounds for column in 1:columns, row in 1:min(column, rows)
+        maximum_value = max(maximum_value, abs(F.factors[row, column]))
+    end
+    return maximum_value
+end
+
 function factor_diagnostics(F::MFLU{MF}) where {MF<:MultiFloat}
     accepted = F.info > 0 ? F.info - 1 : F.info == 0 ? length(F.ipiv) : 0
     minimum_pivot, maximum_pivot =
@@ -272,4 +281,202 @@ function factor_diagnostics(
         rtol=MF(rtol),
         finite=_all_finite(F.factors) && all(isfinite, F.tau),
     )
+end
+
+# ---------------------------------------------------------------------------
+# Factor-cache diagnostics. These build a defensive snapshot from the cache's
+# borrowed storage; they never mutate the cache or its arrays.
+# ---------------------------------------------------------------------------
+
+"""
+    factor_diagnostics(cache::AbstractMFFactorCache)
+
+Return the same stable `NamedTuple` shape as the standalone factor diagnostic
+for the cache's current factorization. Vector-valued fields are copies. A cache
+in the invalidated state reports `state=:invalidated` and `success=false`.
+"""
+function factor_diagnostics(cache::MFCholeskyCache{MF}) where {MF<:MultiFloat}
+    n = size(cache.factors, 1)
+    accepted = cache.status == 0 ? n : cache.status > 0 ? cache.status - 1 : 0
+    minimum_diagonal, maximum_diagonal =
+        _diagonal_magnitude_range(cache.factors, accepted)
+    return (
+        kind=:cholesky,
+        status=factor_status(cache),
+        state=factor_state(cache),
+        success=issuccess(cache),
+        precision=factor_precision(cache),
+        provider=factor_provider(cache),
+        failure_location=factor_status(cache) > 0 ? factor_status(cache) : nothing,
+        accepted_pivots=accepted,
+        minimum_diagonal=minimum_diagonal,
+        maximum_diagonal=maximum_diagonal,
+        diagonal_spread=_optional_spread(minimum_diagonal, maximum_diagonal),
+        finite=_lower_triangle_finite(cache.factors),
+    )
+end
+
+function factor_diagnostics(cache::MFLUCache{MF}) where {MF<:MultiFloat}
+    accepted = cache.status > 0 ? cache.status - 1 :
+               cache.status == 0 ? length(cache.ipiv) : 0
+    minimum_pivot, maximum_pivot =
+        _diagonal_magnitude_range(cache.factors, accepted)
+    maximum_u = _lu_maximum_u(cache)
+    pivot_growth = iszero(cache.original_maximum) ? nothing :
+        maximum_u / cache.original_maximum
+    return (
+        kind=:lu,
+        status=factor_status(cache),
+        state=factor_state(cache),
+        success=issuccess(cache),
+        precision=factor_precision(cache),
+        provider=factor_provider(cache),
+        failure_location=factor_status(cache) > 0 ? factor_status(cache) : nothing,
+        accepted_pivots=accepted,
+        pivots=copy(cache.ipiv),
+        minimum_pivot=minimum_pivot,
+        maximum_pivot=maximum_pivot,
+        original_maximum=factor_status(cache) == -1 ? nothing : cache.original_maximum,
+        maximum_u=maximum_u,
+        pivot_growth=pivot_growth,
+        finite=_all_finite(cache.factors),
+    )
+end
+
+function factor_diagnostics(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
+    one_by_one = 0
+    two_by_two = 0
+    minimum_block = nothing
+    maximum_block_entry = zero(MF)
+    k = 1
+    @inbounds while k <= length(cache.blocks)
+        block = cache.blocks[k]
+        if block == UInt8(1)
+            one_by_one += 1
+            block_value = abs(cache.factors[k, k])
+            minimum_block = minimum_block === nothing ? block_value :
+                min(minimum_block, block_value)
+            maximum_block_entry = max(maximum_block_entry, block_value)
+            k += 1
+        elseif block == UInt8(2) && k < length(cache.blocks)
+            two_by_two += 1
+            d11 = cache.factors[k, k]
+            d21 = cache.dsub[k]
+            d22 = cache.factors[k + 1, k + 1]
+            block_value = _ldlt_smallest_abs_eigenvalue(d11, d21, d22)
+            minimum_block = minimum_block === nothing ? block_value :
+                min(minimum_block, block_value)
+            maximum_block_entry = max(
+                maximum_block_entry, abs(d11), abs(d21), abs(d22),
+            )
+            k += 2
+        else
+            break
+        end
+    end
+    original_maximum = factor_status(cache) == -1 ? nothing : cache.original_maximum
+    minimum_scaled_block =
+        minimum_block === nothing || iszero(cache.original_maximum) ? nothing :
+        minimum_block / cache.original_maximum
+    block_growth = iszero(cache.original_maximum) ? nothing :
+        maximum_block_entry / cache.original_maximum
+    return (
+        kind=:ldlt,
+        status=factor_status(cache),
+        state=factor_state(cache),
+        success=issuccess(cache),
+        precision=factor_precision(cache),
+        provider=factor_provider(cache),
+        failure_location=factor_status(cache) > 0 ? factor_status(cache) : nothing,
+        one_by_one_pivots=one_by_one,
+        two_by_two_pivots=two_by_two,
+        pivots=copy(cache.pivots),
+        blocks=copy(cache.blocks),
+        inertia=_ldlt_cache_inertia(cache),
+        minimum_block_eigenvalue_magnitude=minimum_block,
+        minimum_scaled_block=minimum_scaled_block,
+        original_maximum=original_maximum,
+        maximum_block_entry=maximum_block_entry,
+        block_growth=block_growth,
+        finite=_all_finite(cache.factors) && all(isfinite, cache.dsub),
+    )
+end
+
+function _ldlt_cache_inertia(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
+    positive = 0
+    negative = 0
+    zero_count = 0
+    k = 1
+    @inbounds while k <= length(cache.blocks)
+        block = cache.blocks[k]
+        if block == UInt8(1)
+            pos, neg, zer = _ldlt_inertia_1x1(cache.factors[k, k])
+            k += 1
+        elseif block == UInt8(2) && k < length(cache.blocks)
+            pos, neg, zer = _ldlt_inertia_2x2(
+                cache.factors[k, k], cache.dsub[k], cache.factors[k + 1, k + 1],
+            )
+            k += 2
+        else
+            break
+        end
+        positive += pos
+        negative += neg
+        zero_count += zer
+    end
+    return (positive=positive, negative=negative, zero=zero_count)
+end
+
+function factor_diagnostics(
+    cache::MFRRQRCache{MF};
+    atol::Real=zero(MF),
+    rtol::Real=zero(MF),
+) where {MF<:MultiFloat}
+    diagonal_count = min(size(cache.factors)...)
+    diagonal = Vector{MF}(undef, diagonal_count)
+    @inbounds for index in 1:diagonal_count
+        diagonal[index] = cache.factors[index, index]
+    end
+    minimum_diagonal = isempty(diagonal) ? nothing : minimum(abs, diagonal)
+    maximum_diagonal = isempty(diagonal) ? nothing : maximum(abs, diagonal)
+    rank = issuccess(cache) ? _cache_numerical_rank(cache; atol=atol, rtol=rtol) : 0
+    return (
+        kind=:rrqr,
+        status=factor_status(cache),
+        state=factor_state(cache),
+        success=issuccess(cache),
+        precision=factor_precision(cache),
+        provider=factor_provider(cache),
+        failure_location=nothing,
+        permutation=copy(cache.permutation),
+        rdiag=diagonal,
+        minimum_rdiag=minimum_diagonal,
+        maximum_rdiag=maximum_diagonal,
+        rdiag_spread=_optional_spread(minimum_diagonal, maximum_diagonal),
+        rank_at_threshold=rank,
+        atol=MF(atol),
+        rtol=MF(rtol),
+        finite=_all_finite(cache.factors) && all(isfinite, cache.tau),
+    )
+end
+
+function _cache_numerical_rank(
+    cache::MFRRQRCache{MF};
+    atol::Real=zero(MF),
+    rtol::Real=zero(MF),
+) where {MF<:MultiFloat}
+    absolute_tolerance = MF(atol)
+    relative_tolerance = MF(rtol)
+    diagonal_count = min(size(cache.factors)...)
+    largest = zero(MF)
+    @inbounds for index in 1:diagonal_count
+        largest = max(largest, abs(cache.factors[index, index]))
+    end
+    threshold = max(absolute_tolerance, relative_tolerance * largest)
+    rank = 0
+    @inbounds for index in 1:diagonal_count
+        abs(cache.factors[index, index]) > threshold || break
+        rank += 1
+    end
+    return rank
 end

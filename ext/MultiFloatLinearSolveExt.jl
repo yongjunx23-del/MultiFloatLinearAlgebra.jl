@@ -43,18 +43,15 @@ function _multifloat_matrix(A)
     return matrix
 end
 
-function _factorize(alg::MultiFloatLU, A)
-    return MFLA.lu!(Matrix(_multifloat_matrix(A)); check=false, config=alg.config)
-end
-
-function _factorize(alg::MultiFloatCholesky, A)
-    return MFLA.cholesky!(Matrix(_multifloat_matrix(A)); check=false, config=alg.config)
-end
-
-function _empty_factor(alg, A)
-    matrix = _multifloat_matrix(A)
-    placeholder = Matrix{eltype(matrix)}(undef, 0, 0)
-    return _factorize(alg, placeholder)
+# A fresh empty cache supplies the fixed `cacheval` field type without running
+# the real O(n^3) factorization during `init`. Storage is grown inside `_solve!`
+# on the first (or size-changing) factorization and reused thereafter.
+function _empty_cache(alg::Union{MultiFloatLU,MultiFloatCholesky}, A)
+    MF = eltype(_multifloat_matrix(A))
+    if alg isa MultiFloatLU
+        return MFLA.MFLUCache(MF)
+    end
+    return MFLA.MFCholeskyCache(MF)
 end
 
 function LinearSolve.init_cacheval(
@@ -70,9 +67,9 @@ function LinearSolve.init_cacheval(
     verbose,
     assumptions,
 )
-    # `LinearCache` fixes the cache-value field type at initialization. An empty
-    # factor supplies that type without doing the real O(n^3) factorization twice.
-    return _empty_factor(alg, A)
+    # `LinearCache` fixes the cache-value field type at initialization; an empty
+    # cache supplies that type without doing the real O(n^3) factorization.
+    return _empty_cache(alg, A)
 end
 
 function _failure_solution(cache, alg)
@@ -85,18 +82,31 @@ function _failure_solution(cache, alg)
     )
 end
 
-function _solve!(cache, alg)
-    factor = cache.cacheval
-    if cache.isfresh
-        factor = _factorize(alg, cache.A)
-        cache.cacheval = factor
-        MFLA.issuccess(factor) || return _failure_solution(cache, alg)
-        cache.isfresh = false
-    elseif !MFLA.issuccess(factor)
-        return _failure_solution(cache, alg)
+function _factorize!(cache, alg)
+    cacheval = cache.cacheval
+    A = _multifloat_matrix(cache.A)
+    n = size(A, 1)
+    # Explicit reserve on the first factorization or on a size change; the
+    # warm repeated `factorize!` at an unchanged size only overwrites storage.
+    if size(MFLA.factor_matrix(cacheval), 1) != n
+        MFLA.prepare!(cacheval, n)
     end
+    MFLA.factorize!(cacheval, A; check=false, config=alg.config)
+    return cacheval
+end
 
-    MFLA.ldiv!(cache.u, factor, cache.b; config=alg.config)
+function _solve!(cache, alg)
+    cacheval = cache.cacheval
+    if cache.isfresh
+        _factorize!(cache, alg)
+        # Only a successful factorization is a usable cache; on failure keep
+        # `isfresh` true so a caller can replace A and retry.
+        MFLA.issuccess(cacheval) || return _failure_solution(cache, alg)
+        cache.isfresh = false
+    end
+    MFLA.issuccess(cacheval) || return _failure_solution(cache, alg)
+
+    MFLA.solve!(cache.u, cacheval, cache.b; config=alg.config)
     return SciMLBase.build_linear_solution(
         alg,
         cache.u,

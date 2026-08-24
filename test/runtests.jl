@@ -2844,4 +2844,5 @@ include("qr_delayed_norm.jl")
     end
 end
 include("qr_fixed_permutation.jl")
+include("factor_caches.jl")
 include("linearsolve_extension.jl")

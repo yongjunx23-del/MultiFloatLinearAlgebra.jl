@@ -341,6 +341,55 @@ function _prepare_qr_block_scratch!(
     )
 end
 
+# The RRQR cache owns its blocked-panel scratch; reuse it so the hot
+# `factorize!` path never allocates. Growth only happens inside `prepare!`.
+function _prepare_qr_block_scratch!(
+    ::Type{MF},
+    block_size::Int,
+    column_count::Int,
+    workspace::Union{Nothing,MFRRQRCache{MF}},
+) where {MF<:MultiFloat}
+    if workspace === nothing
+        return (
+            zeros(MF, block_size, column_count),
+            Vector{MF}(undef, block_size),
+        )
+    end
+    current_rows, current_columns = size(workspace.ftranspose)
+    if current_rows < block_size || current_columns < column_count
+        throw(ArgumentError(
+            "RRQR cache scratch not prepared for block_size=$block_size, columns=$column_count; call prepare! with a larger matrix first",
+        ))
+    end
+    length(workspace.auxiliary) >= block_size ||
+        throw(ArgumentError("RRQR cache auxiliary scratch not prepared; call prepare! first"))
+    return (
+        @view(workspace.ftranspose[1:block_size, 1:column_count]),
+        @view(workspace.auxiliary[1:block_size]),
+    )
+end
+
+# Extract the packed-GEMM subworkspace used by the blocked RRQR trailing
+# update. The RRQR cache carries its own `GemmWorkspace`; an `MFWorkspace`
+# routes through its embedded GEMM subworkspace.
+@inline _qr_gemm_workspace(workspace::Nothing) = nothing
+@inline _qr_gemm_workspace(workspace::MFWorkspace{MF}) where {MF} = workspace.gemm
+@inline _qr_gemm_workspace(workspace::MFRRQRCache{MF}) where {MF} = workspace.gemm
+
+# Resolve the `nothing` scratch argument shared by the `MFWorkspace` and
+# `MFRRQRCache` Union methods (avoids dispatch ambiguity).
+function _prepare_qr_block_scratch!(
+    ::Type{MF},
+    block_size::Int,
+    column_count::Int,
+    ::Nothing,
+) where {MF<:MultiFloat}
+    return (
+        zeros(MF, block_size, column_count),
+        Vector{MF}(undef, block_size),
+    )
+end
+
 @inline function _qr_select_pivot_downdated(
     permutation::AbstractVector{Int},
     step::Int,
@@ -456,7 +505,7 @@ function _rrqr_blocked!(
     norm_dirty::AbstractVector{Bool},
     norm_reliability_floor::MF,
     threads::Int,
-    workspace::Union{Nothing,MFWorkspace{MF}},
+    workspace::Union{Nothing,MFWorkspace{MF},MFRRQRCache{MF}},
 ) where {MF<:MultiFloat}
     rows, columns = size(A)
     reflector_count = length(tau)
@@ -591,7 +640,7 @@ function _rrqr_blocked!(
                 ),
                 -one(MF), one(MF);
                 config=kernel_config,
-                workspace=workspace,
+                workspace=_qr_gemm_workspace(workspace),
             )
         end
         _qr_recompute_norm_columns_parallel!(

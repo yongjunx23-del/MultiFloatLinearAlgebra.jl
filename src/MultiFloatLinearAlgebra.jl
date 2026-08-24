@@ -7,6 +7,7 @@ using MultiFloats
 import MultiFloats: MultiFloat, MultiFloatVec
 
 include("types.jl")
+include("factor_cache_defs.jl")
 include("kernels/dot.jl")
 include("kernels/gemv.jl")
 include("kernels/gemm.jl")
@@ -29,6 +30,8 @@ include("factorizations/ldlt_gemmt.jl")
 include("diagnostics.jl")
 include("solve.jl")
 include("residual.jl")
+include("factor_caches.jl")
+include("factor_cache_requirements.jl")
 include("capabilities.jl")
 
 function _linearsolve_extension()
@@ -77,5 +80,8 @@ export ldiv!, solve
 export residual!, residual_mixed!, normwise_backward_error, refinement_correction!
 export capabilities
 export MultiFloatLU, MultiFloatCholesky
+export AbstractMFFactorCache, MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache
+export prepare!, factorize!, solve!, invalidate!
+export workspace_requirements, factor_cache_requirements
 
 end

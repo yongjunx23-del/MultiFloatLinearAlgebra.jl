@@ -70,7 +70,9 @@ import SciMLBase
                 refreshed = SciMLBase.solve!(cache)
                 @test refreshed.retcode == SciMLBase.ReturnCode.Success
                 @test max_relative_error(refreshed.u, expected) <= tolerance(T, 16)
-                @test factor_matrix(cache.cacheval) !== factor_storage
+                # The cache reuses its owned factor storage on an in-place A
+                # update: the numeric factor matrix object is preserved.
+                @test factor_matrix(cache.cacheval) === factor_storage
                 @test !cache.isfresh
                 @test updated_A[1, 1] == original_A[1, 1] + one(T)
             end
