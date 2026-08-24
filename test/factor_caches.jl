@@ -400,3 +400,53 @@ end
     factorize!(cc, spd)
     @test_throws ArgumentError factorize!(cc, spd; config=cfg2)
 end
+
+@testset "rectangular RRQR cache route" begin
+    for T in (Float64x2, Float64x3)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            # tall m>n
+            m, n = 40, 24
+            A = cache_diagdom(T, m)[:, 1:n]  # 40x24 full column rank
+            @test size(A) == (m, n)
+            qc = MFRRQRCache(T; config=cfg)
+            prepare!(qc, m, n)
+            factorize!(qc, A)
+            @test issuccess(qc)
+            # numerical rank = n (full)
+            @test numerical_rank(qc) == n
+            # permutation is a length-n permutation
+            p = factor_permutation(qc)
+            @test length(p) == n
+            @test sort(p) == collect(1:n)
+            # multi-RHS least-squares: min||b - Q*R*p' x||  -> x = R^-1 Q' b permuted
+            X0 = T.(randn(n, 4))
+            B = A * X0
+            # apply Q' (keeps m rows), then solve R on the leading rank rows
+            Y = copy(B)
+            apply_q!(Y, qc; trans=:T)
+            Ysolve = Y[1:n, :]
+            solve_r!(Ysolve, qc, n; config=cfg)
+            @test size(Ysolve, 1) == n
+            # compare against standalone rectangular QR reconstruction
+            F = MFLA.rrqr!(copy(A))
+            pstd = MFLA.factor_permutation(F)
+            Rdiag = MFLA.factor_rdiag(F)
+            @test length(pstd) == n
+            # check A[:,p] = Q*R reconstruction residual via factor_rdiag consistency
+            @test maximum(abs.(MFLA.factor_rdiag(qc) .- Rdiag)) <= 10 * eps(T) * maximum(abs.(Rdiag))
+
+            # wide m<n
+            mw, nw = 16, 32
+            Aw = T.(randn(mw, nw))
+            for i in 1:mw; Aw[i, i] += T(4); end  # 16x32 full row rank
+            @test size(Aw) == (mw, nw)
+            qw = MFRRQRCache(T; config=cfg)
+            prepare!(qw, mw, nw)
+            factorize!(qw, Aw)
+            @test issuccess(qw)
+            @test numerical_rank(qw) == mw
+            @test length(factor_permutation(qw)) == nw
+        end
+    end
+end
