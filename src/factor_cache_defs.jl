@@ -48,6 +48,7 @@ mutable struct MFLUCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     ipiv::Vector{Int}
     status::Int
     original_maximum::MF
+    gemm::GemmWorkspace{MF}
     config::KernelConfig
 end
 
@@ -67,6 +68,7 @@ mutable struct MFLDLTCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     weighted::Matrix{MF}
     status::Int
     original_maximum::MF
+    gemm::GemmWorkspace{MF}
     config::KernelConfig
 end
 
@@ -83,6 +85,7 @@ mutable struct MFRRQRCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     tau::Vector{MF}
     permutation::Vector{Int}
     cycle_leaders::Vector{Int}
+    cycle_count::Int
     norm_scale::Vector{MF}
     norm_sum::Vector{MF}
     norm_dirty::Vector{Bool}

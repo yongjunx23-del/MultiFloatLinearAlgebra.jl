@@ -1,0 +1,40 @@
+MFLA repeated-call allocation audit
+Julia 1.12.6, Julia threads=1, BLAS threads=1, n=64
+Input reset is included; all arrays and GEMM workspace are preallocated.
+
+gemm/auto          x2         threads=1  64x64                  64 bytes
+gemm/packed-reuse  x2         threads=1  64x64                 128 bytes
+gemmt              x2         threads=1  n=64,k=24            4096 bytes
+syrk               x2         threads=1  k=24,n=64               0 bytes
+syrk/packed        x2         threads=1  k=24,n=64               0 bytes
+trsm               x2         threads=1  n=64,nrhs=8            48 bytes
+trsv               x2         threads=1  n=64                    0 bytes
+trmm/right         x2         threads=1  nrhs=8,n=64             0 bytes
+cholesky           x2         threads=1  n=64                  144 bytes
+lu                 x2         threads=1  n=64                 1488 bytes
+ldlt               x2         threads=1  n=64                 1824 bytes
+
+gemm/auto          x3         threads=1  64x64                  64 bytes
+gemm/packed-reuse  x3         threads=1  64x64                 128 bytes
+gemmt              x3         threads=1  n=64,k=24            4096 bytes
+syrk               x3         threads=1  k=24,n=64               0 bytes
+syrk/packed        x3         threads=1  k=24,n=64               0 bytes
+trsm               x3         threads=1  n=64,nrhs=8            48 bytes
+trsv               x3         threads=1  n=64                    0 bytes
+trmm/right         x3         threads=1  nrhs=8,n=64             0 bytes
+cholesky           x3         threads=1  n=64                  144 bytes
+lu                 x3         threads=1  n=64                 1488 bytes
+ldlt               x3         threads=1  n=64                 2368 bytes
+
+gemm/auto          x4         threads=1  64x64                  96 bytes
+gemm/packed-reuse  x4         threads=1  64x64                 160 bytes
+gemmt              x4         threads=1  n=64,k=24            6144 bytes
+syrk               x4         threads=1  k=24,n=64               0 bytes
+syrk/packed        x4         threads=1  k=24,n=64               0 bytes
+trsm               x4         threads=1  n=64,nrhs=8            48 bytes
+trsv               x4         threads=1  n=64                    0 bytes
+trmm/right         x4         threads=1  nrhs=8,n=64             0 bytes
+cholesky           x4         threads=1  n=64                  144 bytes
+lu                 x4         threads=1  n=64                 1584 bytes
+ldlt               x4         threads=1  n=64                 2816 bytes
+

@@ -112,6 +112,52 @@ function _factor_lu_panel!(
 end
 
 """
+    _lu_factorize_core!(A, pivots, config, check)
+
+Shared blocked dense partial-pivoting LU numerical core. Overwrites `A` in
+place with the factor (unit-lower `L` below, `U` on/above) and writes the row
+swaps into `pivots`. Returns the `info` status (`0` success, `-1` nonfinite, or
+the failed pivot index). `pivots` must be length `min(m, n)`. When
+`check=false` it never throws after partial writes. This is the single core
+shared by the standalone [`lu!`](@ref) and the factor cache.
+"""
+function _lu_factorize_core!(
+    A::AbstractMatrix{MF},
+    pivots::AbstractVector{Int},
+    config::KernelConfig,
+    check::Bool,
+    workspace::Union{Nothing,MFWorkspace{MF},GemmWorkspace{MF}}=nothing,
+) where {MF<:MultiFloat}
+    m, n = size(A)
+    kmax = min(m, n)
+    if !_all_finite(A)
+        check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))
+        return -1
+    end
+    info = 0
+    block = max(config.lu_block, 1)
+    for first in 1:block:kmax
+        last = min(first + block - 1, kmax)
+        info = _factor_lu_panel!(A, first, last, pivots)
+        if !iszero(info)
+            check && throw(LinearAlgebra.SingularException(info))
+            return info
+        end
+        if last < n
+            L11 = @view A[first:last, first:last]
+            U12 = @view A[first:last, (last + 1):n]
+            trsm!(U12, L11; side=:left, uplo=:lower, trans=:N, diag=:unit, config=config)
+            if last < m
+                A21 = @view A[(last + 1):m, first:last]
+                A22 = @view A[(last + 1):m, (last + 1):n]
+                gemm!(A22, A21, U12, -one(MF), one(MF); config=config, workspace=workspace)
+            end
+        end
+    end
+    return info
+end
+
+"""
     lu!(A; check=true, config=KernelConfig(), workspace=nothing)
 
 Blocked dense partial-pivoting LU specialized for MultiFloat matrices. The
@@ -124,6 +170,9 @@ The factorization stores unit-lower `L` below the diagonal and `U` on/above
 the diagonal. `ipiv` records the row swap performed at each pivot. With
 `workspace=MFWorkspace(T)`, pivot workspace is reused during factorization and
 the returned factor owns its pivot metadata.
+
+This entry point wraps [`_lu_factorize_core!`](@ref), the single shared
+numerical core, into the standalone factor API.
 """
 function lu!(
     A::AbstractMatrix{MF};
@@ -145,51 +194,9 @@ function lu!(
     end
     original_maximum = _maximum_abs(A)
     ipiv = _prepare_lu_metadata!(MF, kmax, workspace)
-    info = 0
-    block = max(config.lu_block, 1)
-
-    for first in 1:block:kmax
-        last = min(first + block - 1, kmax)
-        info = _factor_lu_panel!(A, first, last, ipiv)
-        if !iszero(info)
-            check && throw(LinearAlgebra.SingularException(info))
-            owned_ipiv = _owned_lu_pivots(ipiv, workspace)
-            return MFLU{MF,typeof(A),typeof(owned_ipiv)}(
-                A, owned_ipiv, info, original_maximum,
-            )
-        end
-
-        if last < n
-            L11 = @view A[first:last, first:last]
-            U12 = @view A[first:last, (last + 1):n]
-            trsm!(
-                U12,
-                L11;
-                side=:left,
-                uplo=:lower,
-                trans=:N,
-                diag=:unit,
-                config=config,
-            )
-
-            if last < m
-                A21 = @view A[(last + 1):m, first:last]
-                A22 = @view A[(last + 1):m, (last + 1):n]
-                gemm!(
-                    A22,
-                    A21,
-                    U12,
-                    -one(MF),
-                    one(MF);
-                    config=config,
-                    workspace=workspace,
-                )
-            end
-        end
-    end
-
+    info = _lu_factorize_core!(A, ipiv, config, check, workspace)
     owned_ipiv = _owned_lu_pivots(ipiv, workspace)
     return MFLU{MF,typeof(A),typeof(owned_ipiv)}(
-        A, owned_ipiv, 0, original_maximum,
+        A, owned_ipiv, info, original_maximum,
     )
 end

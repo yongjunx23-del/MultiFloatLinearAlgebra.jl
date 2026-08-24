@@ -42,35 +42,19 @@ function factorize!(
     Base.require_one_based_indexing(A)
     size(cache.factors, 1) == n ||
         throw(ArgumentError("cache prepared for size $(size(cache.factors, 1)); call prepare!(cache, $n) first"))
+    # Fail-closed: invalidate before touching numerical storage so an unexpected
+    # exception can never leave a stale success behind.
+    invalidate!(cache)
     copyto!(cache.factors, A)
-    cache.status = _factorize_cholesky!(cache.factors, config, check)
+    status = _cholesky_factorize_core!(cache.factors, config, false)
+    cache.status = status
+    check && !iszero(status) && throw(_cholesky_exception(status))
     return cache
 end
 
-function _factorize_cholesky!(A::Matrix{MF}, config::KernelConfig, check::Bool) where {MF<:MultiFloat}
-    n = size(A, 1)
-    if !_lower_triangle_finite(A)
-        check && throw(DomainError(A, "cholesky!: input matrix contains non-finite entries"))
-        return -1
-    end
-    block = max(config.cholesky_block, 1)
-    info = 0
-    for first in 1:block:n
-        last = min(first + block - 1, n)
-        info = _factor_cholesky_panel!(A, first, last)
-        if !iszero(info)
-            check && throw(LinearAlgebra.PosDefException(info))
-            return info
-        end
-        if last < n
-            _solve_cholesky_panel!(A, first, last, config)
-            trailing = @view A[(last + 1):n, (last + 1):n]
-            panel = transpose(@view A[(last + 1):n, first:last])
-            syrk!(trailing, panel, -one(MF), one(MF); uplo=:lower, config=config)
-        end
-    end
-    return 0
-end
+_cholesky_exception(status::Int) =
+    status == -1 ? DomainError(status, "cholesky!: input contains non-finite entries") :
+    LinearAlgebra.PosDefException(status)
 
 """
     solve!(x, cache::MFCholeskyCache, b)
@@ -122,7 +106,14 @@ end
 
 function MFLUCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<:MultiFloat}
     _check_supported(MF)
-    return MFLUCache{MF}(Matrix{MF}(undef, 0, 0), Int[], _FACTOR_CACHE_INVALID, zero(MF), config)
+    return MFLUCache{MF}(
+        Matrix{MF}(undef, 0, 0),
+        Int[],
+        _FACTOR_CACHE_INVALID,
+        zero(MF),
+        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
+        config,
+    )
 end
 
 function prepare!(cache::MFLUCache{MF}, n::Integer; nrhs::Integer=1) where {MF<:MultiFloat}
@@ -130,6 +121,7 @@ function prepare!(cache::MFLUCache{MF}, n::Integer; nrhs::Integer=1) where {MF<:
     nrhs >= 1 || throw(ArgumentError("nrhs must be positive"))
     size(cache.factors, 1) == n || (cache.factors = Matrix{MF}(undef, n, n))
     length(cache.ipiv) == n || (cache.ipiv = Vector{Int}(undef, n))
+    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -145,40 +137,14 @@ function factorize!(
     Base.require_one_based_indexing(A)
     size(cache.factors) == (m, n) ||
         throw(ArgumentError("cache prepared for size $(size(cache.factors)); call prepare!(cache, $m) first"))
+    # Fail-closed: invalidate before touching numerical storage.
+    invalidate!(cache)
     copyto!(cache.factors, A)
-    cache.status = _factorize_lu!(cache.factors, cache.ipiv, config, check)
     cache.original_maximum = _maximum_abs(cache.factors)
+    status = _lu_factorize_core!(cache.factors, cache.ipiv, config, false, cache.gemm)
+    cache.status = status
+    check && !iszero(status) && throw(LinearAlgebra.SingularException(status))
     return cache
-end
-
-function _factorize_lu!(A::Matrix{MF}, ipiv::Vector{Int}, config::KernelConfig, check::Bool) where {MF<:MultiFloat}
-    m, n = size(A)
-    kmax = min(m, n)
-    if !_all_finite(A)
-        check && throw(DomainError(A, "lu!: input matrix contains non-finite entries"))
-        return -1
-    end
-    info = 0
-    block = max(config.lu_block, 1)
-    for first in 1:block:kmax
-        last = min(first + block - 1, kmax)
-        info = _factor_lu_panel!(A, first, last, ipiv)
-        if !iszero(info)
-            check && throw(LinearAlgebra.SingularException(info))
-            return info
-        end
-        if last < n
-            L11 = @view A[first:last, first:last]
-            U12 = @view A[first:last, (last + 1):n]
-            trsm!(U12, L11; side=:left, uplo=:lower, trans=:N, diag=:unit, config=config)
-            if last < m
-                A21 = @view A[(last + 1):m, first:last]
-                A22 = @view A[(last + 1):m, (last + 1):n]
-                gemm!(A22, A21, U12, -one(MF), one(MF); config=config)
-            end
-        end
-    end
-    return 0
 end
 
 function solve!(
@@ -234,6 +200,7 @@ function MFLDLTCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Matrix{MF}(undef, 0, 0),
         _FACTOR_CACHE_INVALID,
         zero(MF),
+        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         config,
     )
 end
@@ -245,6 +212,14 @@ function prepare!(cache::MFLDLTCache{MF}, n::Integer; nrhs::Integer=1) where {MF
     length(cache.dsub) == n || (cache.dsub = Vector{MF}(undef, n))
     length(cache.pivots) == n || (cache.pivots = Vector{Int}(undef, n))
     length(cache.blocks) == n || (cache.blocks = Vector{UInt8}(undef, n))
+    # Weighted panel is allocated in prepare! according to the frozen ldlt_plan,
+    # so factorize! never grows it on the hot path.
+    plan = ldlt_plan(MF, n, cache.config)
+    block_capacity = plan.strategy === :blocked ? plan.block_size : 0
+    if block_capacity > 0 && (size(cache.weighted, 1) != n || size(cache.weighted, 2) < block_capacity + 1)
+        cache.weighted = Matrix{MF}(undef, n, block_capacity + 1)
+    end
+    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -261,54 +236,24 @@ function factorize!(
     Base.require_one_based_indexing(A)
     size(cache.factors, 1) == n ||
         throw(ArgumentError("cache prepared for size $(size(cache.factors, 1)); call prepare!(cache, $n) first"))
+    # Fail-closed: invalidate before touching numerical storage.
+    invalidate!(cache)
     copyto!(cache.factors, A)
-    cache.status = _factorize_ldlt!(cache, check, config)
+    info, original_maximum = _ldlt_factorize_core!(
+        cache.factors, cache.dsub, cache.pivots, cache.blocks, cache.weighted,
+        config, false,
+    )
+    cache.original_maximum = original_maximum
+    cache.status = info
+    check && !iszero(info) && throw(LinearAlgebra.SingularException(info))
     return cache
 end
 
-function _factorize_ldlt!(cache::MFLDLTCache{MF}, check::Bool, config::KernelConfig) where {MF<:MultiFloat}
-    A = cache.factors
-    n = size(A, 1)
-    if !_lower_triangle_finite(A)
-        check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))
-        return -1
-    end
-    _mirror_lower_to_upper!(A)
-    cache.original_maximum = _lower_maximum_abs(A)
-
-    plan = ldlt_plan(MF, n, config)
-    block_capacity = plan.strategy === :blocked ? plan.block_size : 0
-    if block_capacity > 0 && size(cache.weighted, 1) < n
-        cache.weighted = Matrix{MF}(undef, n, block_capacity + 1)
-    end
-    weighted = block_capacity > 0 ? cache.weighted : Matrix{MF}(undef, 0, 0)
-
-    dsub = cache.dsub
-    pivots = cache.pivots
-    blocks = cache.blocks
-    fill!(dsub, zero(MF))
-    fill!(blocks, UInt8(0))
-    @inbounds for index in 1:n
-        pivots[index] = index
-    end
-
-    alpha = (one(MF) + sqrt(MF(17))) / MF(8)
-    info = if plan.strategy === :blocked
-        _factor_ldlt_blocked!(A, dsub, pivots, blocks, weighted, alpha, plan, config)
-    else
-        _factor_ldlt_unblocked!(A, dsub, pivots, blocks, alpha)
-    end
-    if !iszero(info) && check
-        throw(LinearAlgebra.SingularException(info))
-    end
-    return info
-end
-
-function _ldlt_cache_solve!(destination, cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
+function _ldlt_cache_solve!(destination, cache::MFLDLTCache{MF}, config::KernelConfig) where {MF<:MultiFloat}
     _ldlt_cache_apply_forward!(destination, cache)
-    trsv!(destination, cache.factors; uplo=:lower, trans=:N, diag=:unit, config=cache.config)
+    trsv!(destination, cache.factors; uplo=:lower, trans=:N, diag=:unit, config=config)
     _ldlt_cache_solve_d!(destination, cache)
-    trsv!(destination, cache.factors; uplo=:lower, trans=:T, diag=:unit, config=cache.config)
+    trsv!(destination, cache.factors; uplo=:lower, trans=:T, diag=:unit, config=config)
     _ldlt_cache_apply_reverse!(destination, cache)
     return destination
 end
@@ -423,7 +368,7 @@ function solve!(
         throw(DimensionMismatch("right-hand side length differs"))
     _check_no_alias(destination, cache.factors)
     _copy_rhs!(destination, source)
-    return _ldlt_cache_solve!(destination, cache)
+    return _ldlt_cache_solve!(destination, cache, config)
 end
 
 function solve!(
@@ -439,7 +384,7 @@ function solve!(
         throw(DimensionMismatch("right-hand side dimensions differ"))
     _check_no_alias(destination, cache.factors)
     _copy_rhs!(destination, source)
-    return _ldlt_cache_solve!(destination, cache)
+    return _ldlt_cache_solve!(destination, cache, config)
 end
 
 ################################################################################
@@ -452,7 +397,8 @@ function MFRRQRCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Matrix{MF}(undef, 0, 0),
         Vector{MF}(undef, 0),
         Vector{Int}(undef, 0),
-        Int[],
+        Vector{Int}(undef, 0),
+        0,
         Vector{MF}(undef, 0),
         Vector{MF}(undef, 0),
         Vector{Bool}(undef, 0),
@@ -480,6 +426,8 @@ function prepare!(
     size(cache.factors) == (m, n) || (cache.factors = Matrix{MF}(undef, m, n))
     length(cache.tau) == reflector_count || (cache.tau = Vector{MF}(undef, reflector_count))
     length(cache.permutation) == n || (cache.permutation = Vector{Int}(undef, n))
+    length(cache.cycle_leaders) == n || (cache.cycle_leaders = Vector{Int}(undef, n))
+    cache.cycle_count = 0
     length(cache.norm_scale) == n || (cache.norm_scale = Vector{MF}(undef, n))
     length(cache.norm_sum) == n || (cache.norm_sum = Vector{MF}(undef, n))
     length(cache.norm_dirty) == n || (cache.norm_dirty = Vector{Bool}(undef, n))
@@ -498,7 +446,7 @@ function factorize!(
     cache::MFRRQRCache{MF},
     A::AbstractMatrix{MF};
     check::Bool=true,
-    threads::Int=Threads.nthreads(),
+    threads::Int=cache.config.thread_count,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
     m, n = size(A)
@@ -506,8 +454,12 @@ function factorize!(
     Base.require_one_based_indexing(A)
     size(cache.factors) == (m, n) ||
         throw(ArgumentError("cache prepared for size $(size(cache.factors)); call prepare!(cache, $m, $n) first"))
+    # Fail-closed: invalidate before touching numerical storage.
+    invalidate!(cache)
     copyto!(cache.factors, A)
-    cache.status = _factorize_rrqr!(cache, check, threads, config)
+    status = _factorize_rrqr!(cache, false, threads, config)
+    cache.status = status
+    check && !iszero(status) && throw(ArgumentError("rrqr!: input contains non-finite entries"))
     return cache
 end
 
@@ -541,9 +493,38 @@ function _factorize_rrqr!(cache::MFRRQRCache{MF}, check::Bool, threads::Int, con
             norm_margin, norm_reliability_floor, threads,
         )
     end
-    empty!(cache.cycle_leaders)
-    append!(cache.cycle_leaders, _qr_permutation_cycle_leaders!(cache.permutation))
+    # Fixed-capacity cycle leaders: write into the owned buffer and record the
+    # count; never allocate a fresh leaders vector on the hot path.
+    cache.cycle_count = _qr_cycle_leaders_fixed!(cache.cycle_leaders, cache.permutation)
     return 0
+end
+
+# Writes the cycle leaders of `permutation` (p such that p[p[i]] ... cycles) into
+# the caller-owned buffer `leaders` and returns the number written. Mirrors the
+# standalone `_qr_permutation_cycle_leaders!` but never allocates a new vector.
+function _qr_cycle_leaders_fixed!(leaders::Vector{Int}, permutation::AbstractVector{Int})
+    count = 0
+    n = length(permutation)
+    # leaders has length >= n; cycle leaders are a subset.
+    @inbounds for start in 1:n
+        permutation[start] > 0 || continue
+        current = start
+        cycle_length = 0
+        while permutation[current] > 0
+            next = permutation[current]
+            permutation[current] = -next
+            current = next
+            cycle_length += 1
+        end
+        if cycle_length > 1
+            count += 1
+            leaders[count] = start
+        end
+    end
+    @inbounds for index in 1:n
+        permutation[index] = -permutation[index]
+    end
+    return count
 end
 
 function _cache_qr_square_check(destination, cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
@@ -611,6 +592,29 @@ function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; config)
     return destination
 end
 
+# Count-aware cycle permutation over the fixed-capacity leaders buffer, so no
+# SubArray view is allocated on the solve path.
+function _cache_permute_qr_solution!(destination, cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
+    leaders = cache.cycle_leaders
+    @inbounds for c in 1:cache.cycle_count
+        start = leaders[c]
+        value = destination[start]
+        current = start
+        while true
+            target = cache.permutation[current]
+            if target == start
+                destination[target] = value
+                break
+            end
+            next_value = destination[target]
+            destination[target] = value
+            value = next_value
+            current = target
+        end
+    end
+    return destination
+end
+
 function solve!(
     destination::AbstractVector{MF},
     cache::MFRRQRCache{MF},
@@ -623,7 +627,7 @@ function solve!(
     _copy_rhs!(destination, source)
     _cache_apply_q!(destination, cache; trans=:T)
     _cache_solve_r!(destination, cache, n; config=config)
-    _permute_qr_solution!(destination, cache.permutation, cache.cycle_leaders)
+    _cache_permute_qr_solution!(destination, cache)
     return destination
 end
 
@@ -640,5 +644,5 @@ function solve!(
     _copy_rhs!(destination, source)
     _cache_apply_q!(destination, cache; trans=:T)
     _cache_solve_r!(destination, cache, n; config=config)
-    return _permute_qr_solution!(destination, cache.permutation, cache.cycle_leaders)
+    return _cache_permute_qr_solution!(destination, cache)
 end
