@@ -75,6 +75,34 @@ import SciMLBase
                 @test factor_matrix(cache.cacheval) === factor_storage
                 @test !cache.isfresh
                 @test updated_A[1, 1] == original_A[1, 1] + one(T)
+
+                # multi-RHS shares the same cache semantics: one factor, many RHS
+                expected_matrix = T[
+                    1 -2 3
+                    -1 2 1
+                    3 1 -2
+                    2 0 4
+                ]
+                B = A * expected_matrix
+                problem_matrix = LinearSolve.LinearProblem(A, B)
+                matrix_cache = LinearSolve.init(problem_matrix, algorithm)
+                matrix_solution = SciMLBase.solve!(matrix_cache)
+                @test matrix_solution.retcode == SciMLBase.ReturnCode.Success
+                @test max_relative_error(matrix_solution.u, expected_matrix) <= tolerance(T, 16)
+                @test !matrix_cache.isfresh
+                matrix_storage = factor_matrix(matrix_cache.cacheval)
+                # RHS-only multi-RHS update reuses the factor
+                expected_matrix2 = T[
+                    -2 1 0
+                    4 -3 2
+                    0 1 1
+                    2 5 -1
+                ]
+                matrix_cache.b = A * expected_matrix2
+                matrix_solution2 = SciMLBase.solve!(matrix_cache)
+                @test matrix_solution2.retcode == SciMLBase.ReturnCode.Success
+                @test max_relative_error(matrix_solution2.u, expected_matrix2) <= tolerance(T, 16)
+                @test factor_matrix(matrix_cache.cacheval) === matrix_storage
             end
 
             singular = T[1 2; 2 4]
