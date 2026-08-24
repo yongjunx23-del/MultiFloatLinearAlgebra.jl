@@ -275,3 +275,64 @@ end
     @test_throws ArgumentError factor_cache_requirements(:bogus, (n=8,))
     @test_throws ArgumentError workspace_requirements(:bogus, (n=8,), cfg)
 end
+
+# The required fail-closed regression: successful factorize -> failing
+# factorize(check=true) throws -> cache must NOT remain successful -> solve
+# must refuse -> replacement A recovers through refactorization.
+@testset "factor cache fail-closed recovery" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+
+            # Cholesky
+            spd = T[4 1; 1 3]
+            bad_spd = T[1 2; 2 1]           # not positive definite
+            c = MFCholeskyCache(T; config=cfg)
+            prepare!(c, 2)
+            factorize!(c, spd)
+            @test issuccess(c)
+            @test_throws LinearAlgebra.PosDefException factorize!(c, bad_spd; check=true)
+            @test !issuccess(c)              # fail-closed: no stale success
+            @test_throws Exception solve!(zeros(T, 2), c, T[1, 1])
+            factorize!(c, spd; check=false) # recovery
+            @test issuccess(c)
+            x = zeros(T, 2); solve!(x, c, T[5, 4])
+            @test max_relative_error(x, MFLA.ldiv!(copy(T[5, 4]), MFLA.cholesky!(copy(spd); check=false, config=cfg), T[5, 4])) <= tolerance(T, 16)
+
+            # LU
+            good = T[4 1; 1 3]
+            sing = T[1 2; 2 4]
+            lc = MFLUCache(T; config=cfg)
+            prepare!(lc, 2)
+            factorize!(lc, good)
+            @test issuccess(lc)
+            @test_throws LinearAlgebra.SingularException factorize!(lc, sing; check=true)
+            @test !issuccess(lc)
+            @test_throws Exception solve!(zeros(T, 2), lc, T[1, 2])
+            factorize!(lc, good; check=false)
+            @test issuccess(lc)
+
+            # LDLT
+            ind_good = T[2 1; 1 2]
+            ind_sing = T[1 2; 2 4]           # singular symmetric
+            ldc = MFLDLTCache(T; config=cfg)
+            prepare!(ldc, 2)
+            factorize!(ldc, ind_good)
+            @test issuccess(ldc)
+            @test_throws LinearAlgebra.SingularException factorize!(ldc, ind_sing; check=true)
+            @test !issuccess(ldc)
+            @test_throws Exception solve!(zeros(T, 2), ldc, T[1, 1])
+            factorize!(ldc, ind_good; check=false)
+            @test issuccess(ldc)
+
+            # RRQR (rank deficiency is not failure; only nonfinite fails)
+            nf = T[1 NaN; 0 1]
+            qc = MFRRQRCache(T; config=cfg)
+            prepare!(qc, 2)
+            @test_throws ArgumentError factorize!(qc, nf; check=true)
+            @test !issuccess(qc)
+            factorize!(qc, T[4 1; 1 3]; check=false)
+            @test issuccess(qc)
+        end
+    end
+end
