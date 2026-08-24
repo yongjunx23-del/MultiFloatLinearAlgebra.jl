@@ -135,27 +135,28 @@ grow storage.
 ## Zero-allocation status
 
 This status is what the current allocation gate actually asserts. Measured
-with the repeated-call audit (`@allocated` after one warm call), a cache that
-is `prepare!`d for the matrix size:
+with the repeated-call audit (`@allocated` after one warm call, single thread),
+a cache that is `prepare!`d for the matrix size allocates **0 bytes** on every
+warm hot path (verified with `Profile.Allocs` and `@code_warntype`, and
+enforced by the `benchmark/allocation_gate.jl --check` CI gate):
 
 | operation | allocation |
 |---|---|
-| cached **vector** solve | **0 bytes** (asserted by the suite) |
-| cached **matrix** solve | only the shared triangular-kernel dispatch floor; bounded and identical across consecutive calls (the suite asserts equality across calls, not a flat 0) |
-| cached `factorize!` (any kind) | a **small non-zero** amount — shared `gemm`/`trsm`/`syrk` kernel dispatch plus `@view` SubArray creation inside the block loops; never storage growth |
+| cached **vector** solve | **0 bytes** |
+| cached **matrix** solve | **0 bytes** |
+| cached `factorize!` (Cholesky / LU / LDLT incl. blocked / RRQR incl. blocked) | **0 bytes** |
+| repeated `factorize!` (A refactor at unchanged size) | **0 bytes** |
+| success → failure → recovery refactor | **0 bytes** |
 | `invalidate!` | 0 bytes |
 
-`factorize!` is **not** currently zero-allocation. It still allocates a small
-non-zero number of bytes from kernel dispatch and `@view` subarray creation,
-and the RRQR `solve_r!` rectangular route carries the same `@view` SubArray
-cost. These bytes are **under active elimination** and are tracked by the
-allocation gate; do not treat the `factorize!` byte count as a settled or
-guaranteed-zero contract. The only firm guarantees are:
-
-- vector solves allocate **0 bytes**;
-- repeated `factorize!` never grows owned storage (bounded, identical across
-  consecutive calls at an unchanged size);
-- `invalidate!` allocates **0 bytes**.
+The factorization cores and cache solves call kwarg-free, view-free block
+kernels (operating on the parent matrix with explicit offsets), so the warm
+path performs no Julia heap allocation. The standalone factor API (and the
+public `gemm!`/`gemmt!` inspectable-route kernels) may still allocate a small
+amount — the `Symbol`-based `GemmPlan` struct of the route API and the
+`@sync`/`Threads.@spawn` threaded-task closure — which is reported separately
+and is not part of the cache-core gate. Threaded task spawn/fetch allocation is
+also reported separately (task objects, not numerical buffers).
 
 ## Migration
 

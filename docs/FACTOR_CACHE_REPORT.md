@@ -34,16 +34,16 @@ ownable factor.
 
 | operation | verified guarantee |
 |---|---|
-| cached **vector** solve | **0 bytes** (asserted by the suite) |
-| cached **matrix** solve | shared `trsm` kernel-dispatch floor only; bounded and identical across consecutive calls (the suite asserts equality across calls, not a flat 0) |
-| cached `factorize!` (LU/LDLT/RRQR) | a **small non-zero** amount — shared `gemm`/`trsm`/`syrk` kernel dispatch plus `@view` SubArray creation in the block loops; **never** storage growth |
+| cached **vector** solve | **0 bytes** |
+| cached **matrix** solve | **0 bytes** |
+| cached `factorize!` (Cholesky / LU / LDLT incl. blocked / RRQR incl. blocked) | **0 bytes** |
+| repeated `factorize!` (A refactor at unchanged size) | **0 bytes** |
 | `invalidate!` | 0 bytes |
 
-Repeated `factorize!` at an unchanged size produces identical, bounded
-allocation (no storage growth). The residual `factorize!` bytes are **not** a
-settled or guaranteed-zero contract: they are **under active elimination** and
-tracked by the allocation gate. The RRQR `solve_r!` rectangular route carries
-the same `@view` SubArray cost.
+The cache hot path calls kwarg-free, view-free block kernels operating on the
+parent matrix with explicit offsets, so it performs no Julia heap allocation.
+`Profile.Allocs` and `@code_warntype` confirm the sources are eliminated, and
+`benchmark/allocation_gate.jl --check` enforces it as a hard CI gate.
 
 ### LinearSolve extension (n=64, x2)
 
@@ -51,33 +51,37 @@ the same `@view` SubArray cost.
 |---|---|
 | `LinearSolve.init` + first factor+solve | includes LinearCache, factor storage, one factorization |
 | RHS-only update, reuse factor | **0 bytes** (reuses the existing factorization) |
-| A-update in place | re-factorizes into existing storage; **not** asserted 0-byte (same `factorize!` cost class) |
+| A-update in place | re-factorizes into existing storage at the same cost class as a fresh `factorize!` (0-byte core + framework solution wrapper) |
 | failed factorization retcode | reports `ReturnCode.Failure`, `isfresh` stays true so a replacement `A` can be retried |
 
 The old extension allocated a fresh `Matrix(A)` copy plus factor object on every
 fresh factorization; the cache-backed extension performs exactly one storage
 allocation (in `init`/first factorize) and then reuses it. `init` does not run
-the O(n³) factorization.
+the O(n³) factorization. The LinearSolve solution-object construction is a
+framework cost measured separately (escaping-solution measurement defeats
+dead-code elimination) and is not part of the kernel gate.
 
 ## Remaining framework-level overhead
 
-The only non-zero allocations that remain on warm single-threaded paths are
-shared-kernel dispatch and subarray-view costs that predate this change (they
-appear in the baseline audit as `gemm=64`, `trsm=48`). Threaded task creation is
-reported separately and only occurs above documented size thresholds; completing
-the `factorize!` zero-allocation and the threaded-task allocation are **explicit
-remaining work**. The LinearSolve solution-object construction is a framework
-cost measured separately above and is not part of the kernel gate.
+The only non-zero allocations that remain on warm single-threaded paths are in
+the **public** standalone kernels, not the cache core: the `Symbol`-based
+`GemmPlan` struct of the inspectable-route `gemm!`/`gemmt!` API, and
+`@sync`/`Threads.@spawn` threaded-task closure objects (reported separately,
+only above documented size thresholds). These predate this change and appear in
+the baseline audit as `gemm=64`, `trsm=48`. The LinearSolve solution-object
+construction is measured separately and is not part of the kernel gate.
 
 ## Accuracy
 
-Cache solves are validated in `test/factor_caches.jl` **against the standalone
-factor solve for the same input** (`ldiv!` with `cholesky!`/`lu!`/`ldlt!`/
-`rrqr!`), with the maximum-relative-error norm computed in 512-bit BigFloat.
-The reference is the standalone MFLA factor, **not** an independent BigFloat
-oracle, so this report does **not** claim "cache solves validated against
-BigFloat". Whether the suite currently passes is not asserted here; run
-`Pkg.test("MultiFloatLinearAlgebra")` to confirm.
+Cache solves are validated in `test/factor_caches.jl` against the standalone
+factor solve for the same input, and independently in
+`benchmark/independent_accuracy.jl` against a 512-bit `BigFloat` reference.
+The independent validation covers solution relative error, factor
+reconstruction residual (L·Lᵀ, P·A≈L·U, A[p,p]≈L·D·Lᵀ, A[:,p]≈Q·R, QᵀQ≈I),
+normwise backward error, permutation validity, LDLT inertia, LU pivot growth,
+RRQR rank/reconstruction (rank-deficient), pathological/singular/nonfinite/
+badly-scaled inputs, success→failure→recovery, and serial(1t)-vs-threaded(4t)
+bit-identity. The script exits nonzero on any failure.
 
 Pathological, singular, rank-deficient, nonfinite, adjacent-2x2-pivot, multi-RHS,
 aliased, and threaded-vs-serial cases are covered in `test/factor_caches.jl` and

@@ -33,24 +33,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `solve_r!`, `numerical_rank`, `factor_permutation`, and `factor_rdiag` for
   tall/wide factors, in addition to the square full-rank `solve!` path.
 - **LinearSolve tightening.** The weak-dep extension (`MultiFloatLU`,
-  `MultiFloatCholesky`) now initializes an empty cache (no double numerical
-  factorization), reuses the factor across RHS updates, re-factorizes into
-  existing storage on an `A` update, and reports `ReturnCode.Failure` on a
-  failed factorization while keeping the cache fresh so a replacement `A` can
-  be retried.
+  `MultiFloatCholesky`) now builds the cache at the matrix size in
+  `init_cacheval` (reserving O(n²) storage only, no O(n³) factorization at
+  init), so the first `solve!` does not grow storage; reuses the factor across
+  RHS updates, re-factorizes into existing storage on an `A` update, exposes a
+  public `refresh!` for in-place `A` mutation, and reports `ReturnCode.Failure`
+  on a failed factorization while keeping the cache fresh (never retaining a
+  prior success) so a replacement `A` can be retried.
 
-### Allocation-status clarification
+### Zero-allocation cache core
 
-Vector solves are asserted 0-byte; matrix solves allocate only the shared
-triangular-kernel dispatch floor (bounded and identical across calls); and
-`factorize!` still allocates a small non-zero amount (kernel dispatch plus
-`@view` SubArray creation in the block loops). That `factorize!` byte count is
-under active elimination and is tracked by the allocation gate — it is not yet
-a guaranteed-zero contract. Documentation was corrected to stop claiming
-`factorize!` is zero-allocation and to stop asserting that cache solves are
-validated against an independent BigFloat oracle (cache accuracy is validated
-against the standalone factor solve, with a 512-bit BigFloat relative-error
-norm).
+All cache hot paths now allocate **0 bytes** on the warm single-thread path
+(verified with `Profile.Allocs` / `@code_warntype` and enforced by
+`benchmark/allocation_gate.jl --check`):
+
+- cached `factorize!` for Cholesky / LU / LDLT (incl. blocked) / RRQR (incl.
+  blocked);
+- cached vector and matrix `solve!`;
+- repeated `factorize!` (A refactor at unchanged size);
+- success → failure → recovery refactor;
+- `invalidate!`.
+
+This was achieved by replacing the factorization block-loop `@view` SubArray
+creation and keyword-argument dispatch with kwarg-free, view-free block kernels
+that operate on the parent matrix with explicit offsets. The only warm-path
+allocations that remain are threaded-task (`@sync`/`Threads.@spawn`) objects on
+multi-worker routes and the public `gemm!`/`gemmt!` inspectable-route `GemmPlan`
+struct — both reported separately and not part of the cache-core gate.
+
+### Independent numerical validation
+
+`benchmark/independent_accuracy.jl` validates the cache layer against an
+independent 512-bit `BigFloat` reference: solution relative error, factor
+reconstruction residual, normwise backward error, permutation validity, LDLT
+inertia, LU pivot growth, RRQR rank/reconstruction (incl. rank-deficient),
+pathological/singular/nonfinite/badly-scaled inputs, success→failure→recovery,
+and serial(1t)-vs-threaded(4t) bit-identity. The script exits nonzero on any
+failure.
 
 ### Versioning
 

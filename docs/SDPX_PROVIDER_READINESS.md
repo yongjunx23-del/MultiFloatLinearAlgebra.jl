@@ -138,9 +138,11 @@ Solver-facing facts for SDPX:
   successful; a failed cache is recovered by replacing `A` (same size) and
   re-running `factorize!`.
 - **Reusable factor storage.** A cache owns its factor matrix and metadata.
-  Repeated `factorize!` never grows owned storage; repeated **vector** `solve!`
-  allocates 0 bytes. `A` value updates reuse storage; size growth is explicit
-  through `prepare!`.
+  Repeated `factorize!` never grows owned storage; **vector and matrix** `solve!`
+  and all four `factorize!` paths (Cholesky / LU / LDLT incl. blocked / RRQR
+  incl. blocked) allocate **0 bytes** on the warm single-thread path, enforced
+  by the `benchmark/allocation_gate.jl --check` CI gate. `A` value updates reuse
+  storage; size growth is explicit through `prepare!`.
 - **Frozen configuration.** A cache's `KernelConfig` is fixed; changing it goes
   through `reconfigure!` + `prepare!`, never through a hot-path `config=` that
   differs from `cache.config`.
@@ -159,15 +161,12 @@ Solver-facing facts for SDPX:
 
 ### Explicit remaining work (not yet a "final" cache)
 
-- **`factorize!` zero-allocation completion.** `factorize!` still allocates a
-  small non-zero amount (shared-kernel dispatch plus `@view` SubArray creation
-  in the block loops). This is tracked by the allocation gate and is under
-  active elimination; it is **not** yet a guaranteed-zero contract. Vector solves
-  are 0-byte; matrix solves carry only the shared triangular-kernel dispatch
-  floor.
-- **Threaded task allocation.** Threaded task creation is reported separately
-  and only occurs above documented size thresholds; bringing it under the same
-  guarantee is part of the remaining work.
+- **Threaded task allocation.** Single-thread numerical buffers are all
+  0-byte; the only warm-path allocation that remains is the `@sync`/
+  `Threads.@spawn` task objects on threaded (>1 worker) routes and the public
+  `gemm!`/`gemmt!` inspectable-route `GemmPlan` struct (a `Symbol`-based route
+  descriptor, separate from the cache core). These are reported separately and
+  are the explicit remaining work.
 
 ### LinearSolve weak-dep extension
 
