@@ -300,3 +300,94 @@ function trsm!(
     end
     return B
 end
+
+# Positional, kwarg-free entry point used by the factor-cache solve hot path to
+# avoid the keyword-NamedTuple allocation. Mirrors `trsm!` exactly.
+function _trsm!(
+    B::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    alpha::MF,
+    side::Symbol,
+    uplo::Symbol,
+    trans::Symbol,
+    diag::Symbol,
+    config::KernelConfig,
+) where {MF<:MultiFloat}
+    n, m = size(A)
+    n == m || throw(DimensionMismatch("_trsm! requires a square triangular matrix"))
+    _check_supported(MF)
+    Base.require_one_based_indexing(B, A)
+    _require_no_output_alias("_trsm!", B, A)
+    _trsm_scale!(B, alpha)
+    transposed = trans === :T
+    effective_lower = (uplo === :lower) == !transposed
+    unit_diagonal = diag === :unit
+    if side === :left
+        rhs_columns = size(B, 2)
+        tile = max(config.column_tile, 4)
+        jobs = cld(rhs_columns, tile)
+        workers = _workers(config, jobs)
+        if workers == 1 || jobs <= 1
+            _trsm_left_columns!(B, A, 1, rhs_columns, effective_lower, transposed, unit_diagonal)
+        else
+            _trsm_left_threaded!(B, A, rhs_columns, tile, workers, jobs, effective_lower, transposed, unit_diagonal)
+        end
+    else
+        rows = size(B, 1)
+        tile = max(2 * config.column_tile, 16)
+        jobs = cld(rows, tile)
+        workers = _workers(config, jobs)
+        if workers == 1 || jobs <= 1
+            _trsm_right_rows!(B, A, 1, rows, effective_lower, transposed, unit_diagonal)
+        else
+            _trsm_right_threaded!(B, A, rows, tile, workers, jobs, effective_lower, transposed, unit_diagonal)
+        end
+    end
+    return B
+end
+
+# The threaded branches are kept in separate (non-inlined) helpers so the
+# single-thread `_trsm!` path contains no `@sync`/`Threads.@spawn` closure to
+# hoist, keeping the warm solve allocation-free.
+function _trsm_left_threaded!(B, A, rhs_columns, tile, workers, jobs, effective_lower, transposed, unit_diagonal)
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            for job in worker:workers:jobs
+                first_column = (job - 1) * tile + 1
+                last_column = min(job * tile, rhs_columns)
+                _trsm_left_columns!(B, A, first_column, last_column, effective_lower, transposed, unit_diagonal)
+            end
+        end
+    end
+    return B
+end
+
+function _trsm_right_threaded!(B, A, rows, tile, workers, jobs, effective_lower, transposed, unit_diagonal)
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            for job in worker:workers:jobs
+                first_row = (job - 1) * tile + 1
+                last_row = min(job * tile, rows)
+                _trsm_right_rows!(B, A, first_row, last_row, effective_lower, transposed, unit_diagonal)
+            end
+        end
+    end
+    return B
+end
+
+# View-free, kwarg-free upper-triangular solve on the leading `rank`-square block
+# of the parent `A` (offset 0). Solves R[1:rank,1:rank] * B = B in place for a
+# matrix destination, matching `trsm!(...; side=:left, uplo=:upper, trans=:N,
+# diag=:nonunit)` bit-for-bit but with zero allocation.
+function _trsm_leading_upper!(B::AbstractMatrix{MF}, A::AbstractMatrix{MF}, rank::Int) where {MF<:MultiFloat}
+    @inbounds for column in axes(B, 2)
+        for row in rank:-1:1
+            value = B[row, column]
+            for k in (row + 1):rank
+                value -= A[row, k] * B[k, column]
+            end
+            B[row, column] = value / A[row, row]
+        end
+    end
+    return B
+end

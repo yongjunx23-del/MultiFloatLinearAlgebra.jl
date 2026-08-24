@@ -98,8 +98,8 @@ function solve!(
         throw(DimensionMismatch("right-hand side dimensions differ"))
     _check_no_alias(destination, cache.factors)
     _copy_rhs!(destination, source)
-    trsm!(destination, cache.factors; side=:left, uplo=:lower, trans=:N, diag=:nonunit, config=config)
-    trsm!(destination, cache.factors; side=:left, uplo=:lower, trans=:T, diag=:nonunit, config=config)
+    _trsm!(destination, cache.factors, one(MF), :left, :lower, :N, :nonunit, config)
+    _trsm!(destination, cache.factors, one(MF), :left, :lower, :T, :nonunit, config)
     return destination
 end
 
@@ -187,8 +187,8 @@ function solve!(
     _check_no_alias(destination, cache.factors)
     _copy_rhs!(destination, source)
     _apply_pivots!(destination, cache.ipiv)
-    trsm!(destination, cache.factors; side=:left, uplo=:lower, trans=:N, diag=:unit, config=config)
-    trsm!(destination, cache.factors; side=:left, uplo=:upper, trans=:N, diag=:nonunit, config=config)
+    _trsm!(destination, cache.factors, one(MF), :left, :lower, :N, :unit, config)
+    _trsm!(destination, cache.factors, one(MF), :left, :upper, :N, :nonunit, config)
     return destination
 end
 
@@ -263,7 +263,7 @@ end
     return destination
 end
 @inline function _ldlt_tri_solve!(destination::AbstractMatrix{MF}, factors, trans::Symbol, config) where {MF<:MultiFloat}
-    trsm!(destination, factors; side=:left, uplo=:lower, trans=trans, diag=:unit, config=config)
+    _trsm!(destination, factors, one(MF), :left, :lower, trans, :unit, config)
     return destination
 end
 
@@ -604,11 +604,11 @@ end
 
 function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; config) where {MF<:MultiFloat}
     rank == 0 && return destination
-    leading = @view cache.factors[1:rank, 1:rank]
     if destination isa AbstractVector
+        leading = @view cache.factors[1:rank, 1:rank]
         trsv!(destination, leading; uplo=:upper, trans=:N, diag=:nonunit, config=config)
     else
-        trsm!(destination, leading; side=:left, uplo=:upper, trans=:N, diag=:nonunit, config=config)
+        _trsm_leading_upper!(destination, cache.factors, rank)
     end
     return destination
 end
