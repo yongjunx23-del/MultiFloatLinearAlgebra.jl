@@ -3,7 +3,7 @@ import MultiFloatLinearAlgebra
 using MultiFloatLinearAlgebra: MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache,
     prepare!, factorize!, solve!, invalidate!, factor_status, factor_diagnostics,
     factor_kind, factor_state, issuccess, factor_matrix,
-    workspace_requirements, factor_cache_requirements
+    workspace_requirements, factor_cache_requirements, factor_cache_capacity
 
 const MFLA = MultiFloatLinearAlgebra
 
@@ -262,18 +262,54 @@ end
     T = Float64x2
     cfg = KernelConfig(thread_count=1)
     # pure: repeated queries are identical and do not mutate any state
-    w0 = workspace_requirements(:lu, (n=64,), cfg)
-    w1 = workspace_requirements(:lu, (n=64,), cfg)
+    w0 = workspace_requirements(T, :lu, (n=64,), cfg)
+    w1 = workspace_requirements(T, :lu, (n=64,), cfg)
     @test w0 == w1
-    @test w0.factor == 64
-    wg = workspace_requirements(:gemm, (m=64, k=64, n=64), cfg)
-    @test wg.gemm_capacity == 64 * max(cfg.gemm_panel_columns, 1)
-    r = factor_cache_requirements(:cholesky, (n=64,))
+    @test w0.factorization == 64
+    wg = workspace_requirements(T, :gemm, (m=64, k=64, n=64), cfg)
+    plan = gemm_plan(T, 64, 64, 64, cfg)
+    @test wg.gemm_workers == plan.workers
+    @test wg.gemm_capacity == plan.packed_elements_per_worker
+    r = factor_cache_requirements(T, :cholesky, (n=64,), cfg)
     @test r.factor_matrix_elements == 64 * 64
-    rr = factor_cache_requirements(:rrqr, (m=64, n=48))
+    rr = factor_cache_requirements(T, :rrqr, (m=64, n=48), cfg)
     @test rr.matrix == (m=64, n=48)
-    @test_throws ArgumentError factor_cache_requirements(:bogus, (n=8,))
-    @test_throws ArgumentError workspace_requirements(:bogus, (n=8,), cfg)
+    @test_throws ArgumentError factor_cache_requirements(T, :bogus, (n=8,), cfg)
+    @test_throws ArgumentError workspace_requirements(T, :bogus, (n=8,), cfg)
+end
+
+@testset "factor cache requirements/capacity consistency" begin
+    for T in (Float64x2, Float64x3, Float64x4), kind in (:cholesky, :lu, :ldlt, :rrqr)
+        n = 48
+        cfg = KernelConfig(thread_count=1)
+        shape = kind === :rrqr ? (m=n, n=n) : (n=n,)
+        req = factor_cache_requirements(T, kind, shape, cfg)
+        cache = if kind === :cholesky
+            MFCholeskyCache(T; config=cfg)
+        elseif kind === :lu
+            MFLUCache(T; config=cfg)
+        elseif kind === :ldlt
+            MFLDLTCache(T; config=cfg)
+        else
+            MFRRQRCache(T; config=cfg)
+        end
+        prepare!(cache, n)
+        cap = factor_cache_capacity(cache)
+        @test cap.matrix == req.matrix
+        @test cap.factor_matrix_elements == req.factor_matrix_elements
+        @test cap.pivots == req.pivots
+        @test cap.blocks == req.blocks
+        @test cap.dsub == req.dsub
+        @test cap.weighted_panel == req.weighted_panel
+        @test cap.tau == req.tau
+        @test cap.permutation == req.permutation
+        @test cap.cycle_leaders_capacity == req.cycle_leaders_capacity
+        @test cap.norm_scale == req.norm_scale
+        @test cap.norm_sum == req.norm_sum
+        @test cap.norm_dirty == req.norm_dirty
+        @test cap.ftranspose == req.ftranspose
+        @test cap.auxiliary == req.auxiliary
+    end
 end
 
 # The required fail-closed regression: successful factorize -> failing

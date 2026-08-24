@@ -82,6 +82,6 @@ export capabilities
 export MultiFloatLU, MultiFloatCholesky
 export AbstractMFFactorCache, MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache
 export prepare!, factorize!, solve!, invalidate!, reconfigure!
-export workspace_requirements, factor_cache_requirements
+export workspace_requirements, factor_cache_requirements, factor_cache_capacity
 
 end

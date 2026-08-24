@@ -658,3 +658,123 @@ function solve!(
     _cache_solve_r!(destination, cache, n; config=config)
     return _cache_permute_qr_solution!(destination, cache)
 end
+
+################################################################################
+# Public rectangular RRQR cache route (SDPX equality/null-space use).
+################################################################################
+
+"""
+    apply_q!(destination, cache::MFRRQRCache; trans=:N)
+
+Overwrite a vector or matrix `B` with `Q*B` (`trans=:N`) or `Q'*B`
+(`trans=:T`) using the cache's compact Householder representation. Supports
+tall, wide, and square factors and vector or multi-RHS destinations. `B` must
+have one row per row of the factorized matrix and must not alias the factor
+storage. Zero allocation on the warm path.
+"""
+function apply_q!(
+    destination::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    cache::MFRRQRCache{MF};
+    trans::Symbol=:N,
+) where {MF<:MultiFloat}
+    _check_config_frozen(cache, cache.config)
+    issuccess(cache) || throw(ArgumentError("apply_q! requires a successful QR cache"))
+    trans in (:N, :T) || throw(ArgumentError("trans must be :N or :T"))
+    Base.require_one_based_indexing(destination, cache.factors)
+    size(destination, 1) == size(cache.factors, 1) ||
+        throw(DimensionMismatch("apply_q! destination row count differs"))
+    Base.mightalias(destination, cache.factors) &&
+        throw(ArgumentError("apply_q! destination must not alias QR storage"))
+    return _cache_apply_q!(destination, cache; trans=trans)
+end
+
+"""
+    solve_r!(destination, cache::MFRRQRCache, rank; trans=:N, config=cache.config)
+
+Solve the caller-selected leading `rank` block of `R` in place. `trans=:N`
+solves `R[1:rank,1:rank] * X = B`; `trans=:T` solves the transposed system.
+The destination must have exactly `rank` rows. The caller chooses the rank
+threshold; MFLA never infers rank. Vector and matrix destinations are
+supported.
+"""
+function solve_r!(
+    destination::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    cache::MFRRQRCache{MF},
+    rank::Integer;
+    trans::Symbol=:N,
+    config::KernelConfig=cache.config,
+) where {MF<:MultiFloat}
+    _check_config_frozen(cache, config)
+    rank_value = Int(rank)
+    issuccess(cache) || throw(ArgumentError("solve_r! requires a successful QR cache"))
+    trans in (:N, :T) || throw(ArgumentError("trans must be :N or :T"))
+    maximum_rank = min(size(cache.factors)...)
+    0 <= rank_value <= maximum_rank ||
+        throw(ArgumentError("rank must be between zero and $maximum_rank"))
+    size(destination, 1) == rank_value ||
+        throw(DimensionMismatch("solve_r! destination row count must equal rank"))
+    Base.require_one_based_indexing(destination, cache.factors)
+    @inbounds for index in 1:rank_value
+        iszero(cache.factors[index, index]) &&
+            throw(LinearAlgebra.SingularException(index))
+    end
+    return _cache_solve_r!(destination, cache, rank_value; config=config)
+end
+
+"""
+    numerical_rank(cache::MFRRQRCache; atol=0, rtol=0) -> Int
+
+Evaluate the leading numerical rank with the caller's nonnegative absolute and
+relative thresholds, exactly as [`numerical_rank`](@ref) does for the standalone
+RRQR factor. Diagonal `i` is accepted while
+`abs(R[i,i]) > max(atol, rtol * maximum(abs.(diag(R))))`. MFLA does not select a
+rank threshold.
+"""
+function numerical_rank(
+    cache::MFRRQRCache{MF};
+    atol::Real=zero(MF),
+    rtol::Real=zero(MF),
+) where {MF<:MultiFloat}
+    issuccess(cache) || throw(ArgumentError("numerical_rank requires a successful QR cache"))
+    absolute_tolerance = MF(atol)
+    relative_tolerance = MF(rtol)
+    isfinite(absolute_tolerance) && absolute_tolerance >= zero(MF) ||
+        throw(ArgumentError("atol must be finite and nonnegative"))
+    isfinite(relative_tolerance) && relative_tolerance >= zero(MF) ||
+        throw(ArgumentError("rtol must be finite and nonnegative"))
+
+    diagonal_count = min(size(cache.factors)...)
+    largest = zero(MF)
+    @inbounds for index in 1:diagonal_count
+        largest = max(largest, abs(cache.factors[index, index]))
+    end
+    threshold = max(absolute_tolerance, relative_tolerance * largest)
+    rank = 0
+    @inbounds for index in 1:diagonal_count
+        abs(cache.factors[index, index]) > threshold || break
+        rank += 1
+    end
+    return rank
+end
+
+"""
+    factor_permutation(cache::MFRRQRCache) -> Vector{Int}
+
+Return a caller-owned copy of the column permutation `p` satisfying
+`A_original[:, p] = Q * R`.
+"""
+factor_permutation(cache::MFRRQRCache) = copy(cache.permutation)
+
+"""
+    factor_rdiag(cache::MFRRQRCache) -> Vector{MF}
+
+Return a copy of the signed diagonal of the compactly stored `R` factor.
+"""
+function factor_rdiag(cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
+    diagonal_count = min(size(cache.factors)...)
+    diagonal = Vector{MF}(undef, diagonal_count)
+    @inbounds for index in 1:diagonal_count
+        diagonal[index] = cache.factors[index, index]
+    end
+    return diagonal
+end
