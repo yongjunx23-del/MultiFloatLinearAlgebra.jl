@@ -149,6 +149,12 @@ function factorize!(
     invalidate!(cache)
     copyto!(cache.factors, A)
     cache.original_maximum = _maximum_abs(cache.factors)
+    # Deterministically initialize pivots to identity so a nonfinite failure
+    # (which returns before the core writes pivots) leaves a well-defined state
+    # rather than stale data from a prior round. Allocation-free on the warm path.
+    @inbounds for i in eachindex(cache.ipiv)
+        cache.ipiv[i] = i
+    end
     status = _lu_factorize_core_viewfree!(cache.factors, cache.ipiv, config, false)
     cache.status = status
     check && !iszero(status) && throw(LinearAlgebra.SingularException(status))
@@ -250,6 +256,14 @@ function factorize!(
     # Fail-closed: invalidate before touching numerical storage.
     invalidate!(cache)
     copyto!(cache.factors, A)
+    # Deterministically initialize metadata so a nonfinite failure (which
+    # returns before the core initializes it) leaves a well-defined state
+    # rather than stale data from a prior round. Allocation-free on the warm path.
+    fill!(cache.dsub, zero(MF))
+    fill!(cache.blocks, UInt8(0))
+    @inbounds for i in eachindex(cache.pivots)
+        cache.pivots[i] = i
+    end
     info, original_maximum = _ldlt_factorize_core!(
         cache.factors, cache.dsub, cache.pivots, cache.blocks, cache.weighted,
         config, false,
@@ -494,14 +508,17 @@ function _factorize_rrqr!(cache::MFRRQRCache{MF}, check::Bool, threads::Int, con
     A = cache.factors
     m, n = size(A)
     reflector_count = min(m, n)
+    # Deterministically initialize metadata BEFORE the nonfinite check so a
+    # nonfinite failure leaves a well-defined (identity/zero) state rather than
+    # stale data from a prior round. Allocation-free on the warm path.
+    fill!(cache.tau, zero(MF))
+    @inbounds for column in 1:n
+        cache.permutation[column] = column
+    end
     finite_input = _all_finite(A)
     if !finite_input
         check && throw(ArgumentError("rrqr!: input matrix contains non-finite entries"))
         return -1
-    end
-    fill!(cache.tau, zero(MF))
-    @inbounds for column in 1:n
-        cache.permutation[column] = column
     end
     _qr_initialize_norm_state!(A, cache.norm_scale, cache.norm_sum, cache.norm_dirty)
     norm_margin = sqrt(eps(MF))

@@ -350,6 +350,29 @@ end
             @test dnf.maximum_u === nothing
             @test dnf.pivot_growth === nothing
             @test dnf.original_maximum === nothing
+            @test dnf.pivots === nothing
+            @test dnf.finite == false
+
+            # nonfinite failure must not return stale metadata from a prior
+            # successful factorization (LU pivots, LDLT blocks/inertia, RRQR
+            # permutation/rdiag all become nothing).
+            lc2 = MFLUCache(T; config=cfg); prepare!(lc2, 4)
+            factorize!(lc2, T[0 1 0 0; 1 0 0 0; 0 0 1 0; 0 0 0 1])
+            @test issuccess(lc2)
+            factorize!(lc2, T[1 NaN 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]; check=false)
+            @test factor_diagnostics(lc2).pivots === nothing
+            ldc2 = MFLDLTCache(T; config=cfg); prepare!(ldc2, 4)
+            factorize!(ldc2, T[4 1 0 0; 1 3 1 0; 0 1 4 1; 0 0 1 3])
+            @test issuccess(ldc2)
+            factorize!(ldc2, T[1 0 0 0; NaN 1 0 0; 0 0 1 0; 0 0 0 1]; check=false)
+            @test factor_diagnostics(ldc2).blocks === nothing
+            @test factor_diagnostics(ldc2).inertia === nothing
+            qc2 = MFRRQRCache(T; config=cfg); prepare!(qc2, 4, 4)
+            factorize!(qc2, T[0 1 0 0; 1 0 0 0; 0 0 1 0; 0 0 0 1])
+            @test issuccess(qc2)
+            factorize!(qc2, T[1 NaN 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]; check=false)
+            @test factor_diagnostics(qc2).permutation === nothing
+            @test factor_diagnostics(qc2).rdiag === nothing
 
             # singular failure: meaningful fields, not nothing
             ls = MFLUCache(T; config=cfg); prepare!(ls, 2)
@@ -359,11 +382,32 @@ end
             @test dsing.failure_location isa Int
             @test dsing.pivots isa Vector
 
+            # LU singular: the pivot tail beyond the accepted count is identity,
+            # not uninitialized garbage.
+            ls4 = MFLUCache(T; config=cfg); prepare!(ls4, 4)
+            factorize!(ls4, T[1 2 0 0; 2 4 0 0; 0 0 1 0; 0 0 0 1]; check=false)
+            dsing4 = factor_diagnostics(ls4)
+            @test dsing4.accepted_pivots == 1
+            @test dsing4.pivots[2:end] == [2, 3, 4]
+
             # failure -> recovery diagnostics
             factorize!(ls, T[4 1; 1 3]; check=false)
             drec = factor_diagnostics(ls)
             @test drec.success == true
             @test drec.state == :success
+
+            # repeat cycle: fresh -> success -> nonfinite -> diagnostics ->
+            # recovery, twice, must be round-independent (no stale metadata).
+            for _ in 1:2
+                rc = MFLUCache(T; config=cfg); prepare!(rc, 4)
+                factorize!(rc, T[0 1 0 0; 1 0 0 0; 0 0 1 0; 0 0 0 1])
+                @test issuccess(rc)
+                factorize!(rc, T[1 NaN 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]; check=false)
+                @test factor_diagnostics(rc).pivots === nothing
+                factorize!(rc, T[4 1 0 0; 1 3 1 0; 0 1 4 1; 0 0 1 3]; check=false)
+                @test issuccess(rc)
+                @test factor_diagnostics(rc).pivots isa Vector
+            end
         end
     end
 end
