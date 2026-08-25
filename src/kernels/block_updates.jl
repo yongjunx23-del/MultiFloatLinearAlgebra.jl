@@ -105,34 +105,80 @@ function _lu_trailing_gemm!(A::AbstractMatrix{MF}, first::Int, last::Int) where 
     m, n = size(A)
     V4 = MultiFloatVec{4,T,N}
     # A22 <- A22 - A21 * U12, where A21 = A[(last+1):m, first:last] (unit lower
-    # multipliers), U12 = A[first:last, (last+1):n] (upper).
-    for column in (last + 1):n
-        row = last + 1
-        @inbounds while row + 3 <= m
-            acc0 = zero(MF)
-            acc1 = zero(MF)
-            acc2 = zero(MF)
-            acc3 = zero(MF)
-            for k in first:last
-                m0 = A[row, k]; m1 = A[row + 1, k]; m2 = A[row + 2, k]; m3 = A[row + 3, k]
-                u = A[k, column]
-                acc0 -= m0 * u
-                acc1 -= m1 * u
-                acc2 -= m2 * u
-                acc3 -= m3 * u
+    # multipliers), U12 = A[first:last, (last+1):n] (upper). Uses the same V4
+    # 2-column store-pair schedule as the public direct GEMM so the O(n^3)
+    # trailing update is not slower than the standalone factorization.
+    trailing_first = last + 1
+    trailing_rows = m - last
+    trailing_cols = n - last
+    panel_cols = last - first + 1
+    col = 1
+    @inbounds while col + 1 <= trailing_cols
+        parent_c1 = trailing_first + col - 1
+        parent_c2 = parent_c1 + 1
+        row = 1
+        while row + 3 <= trailing_rows
+            parent_r0 = trailing_first + row - 1
+            first_acc = zero(V4)
+            second_acc = zero(V4)
+            for k in 1:panel_cols
+                values = V4(
+                    A[parent_r0, first + k - 1],
+                    A[parent_r0 + 1, first + k - 1],
+                    A[parent_r0 + 2, first + k - 1],
+                    A[parent_r0 + 3, first + k - 1],
+                )
+                first_acc -= values * V4(A[first + k - 1, parent_c1])
+                second_acc -= values * V4(A[first + k - 1, parent_c2])
             end
-            A[row, column] += acc0
-            A[row + 1, column] += acc1
-            A[row + 2, column] += acc2
-            A[row + 3, column] += acc3
+            for lane in 1:4
+                A[parent_r0 + lane - 1, parent_c1] += first_acc[lane]
+                A[parent_r0 + lane - 1, parent_c2] += second_acc[lane]
+            end
             row += 4
         end
-        while row <= m
-            acc = zero(MF)
-            for k in first:last
-                acc -= A[row, k] * A[k, column]
+        while row <= trailing_rows
+            parent_r = trailing_first + row - 1
+            acca = zero(MF)
+            accb = zero(MF)
+            for k in 1:panel_cols
+                a = A[parent_r, first + k - 1]
+                acca -= a * A[first + k - 1, parent_c1]
+                accb -= a * A[first + k - 1, parent_c2]
             end
-            A[row, column] += acc
+            A[parent_r, parent_c1] += acca
+            A[parent_r, parent_c2] += accb
+            row += 1
+        end
+        col += 2
+    end
+    if col <= trailing_cols
+        parent_c = trailing_first + col - 1
+        row = 1
+        while row + 3 <= trailing_rows
+            accumulator = zero(V4)
+            for k in 1:panel_cols
+                parent_r0 = trailing_first + row - 1
+                values = V4(
+                    A[parent_r0, first + k - 1],
+                    A[parent_r0 + 1, first + k - 1],
+                    A[parent_r0 + 2, first + k - 1],
+                    A[parent_r0 + 3, first + k - 1],
+                )
+                accumulator -= values * V4(A[first + k - 1, parent_c])
+            end
+            for lane in 1:4
+                A[trailing_first + row + lane - 2, parent_c] += accumulator[lane]
+            end
+            row += 4
+        end
+        while row <= trailing_rows
+            parent_r = trailing_first + row - 1
+            accumulator = zero(MF)
+            for k in 1:panel_cols
+                accumulator -= A[parent_r, first + k - 1] * A[first + k - 1, parent_c]
+            end
+            A[parent_r, parent_c] += accumulator
             row += 1
         end
     end
@@ -326,26 +372,22 @@ function _rrqr_trailing_gemm_viewfree!(
         row = 1
         while row + 3 <= trailing_rows
             parent_r0 = trailing_first + row - 1
-            acc0a = zero(MF); acc1a = zero(MF); acc2a = zero(MF); acc3a = zero(MF)
-            acc0b = zero(MF); acc1b = zero(MF); acc2b = zero(MF); acc3b = zero(MF)
+            first_acc = zero(V4)
+            second_acc = zero(V4)
             for k in 1:panel_cols
-                a0 = A[parent_r0, block_start + k - 1]
-                a1 = A[parent_r0 + 1, block_start + k - 1]
-                a2 = A[parent_r0 + 2, block_start + k - 1]
-                a3 = A[parent_r0 + 3, block_start + k - 1]
-                f1 = ftranspose[k, parent_c1]
-                f2 = ftranspose[k, parent_c2]
-                acc0a += a0 * f1; acc1a += a1 * f1; acc2a += a2 * f1; acc3a += a3 * f1
-                acc0b += a0 * f2; acc1b += a1 * f2; acc2b += a2 * f2; acc3b += a3 * f2
+                values = V4(
+                    A[parent_r0, block_start + k - 1],
+                    A[parent_r0 + 1, block_start + k - 1],
+                    A[parent_r0 + 2, block_start + k - 1],
+                    A[parent_r0 + 3, block_start + k - 1],
+                )
+                first_acc += values * V4(ftranspose[k, parent_c1])
+                second_acc += values * V4(ftranspose[k, parent_c2])
             end
-            A[parent_r0, parent_c1] -= acc0a
-            A[parent_r0 + 1, parent_c1] -= acc1a
-            A[parent_r0 + 2, parent_c1] -= acc2a
-            A[parent_r0 + 3, parent_c1] -= acc3a
-            A[parent_r0, parent_c2] -= acc0b
-            A[parent_r0 + 1, parent_c2] -= acc1b
-            A[parent_r0 + 2, parent_c2] -= acc2b
-            A[parent_r0 + 3, parent_c2] -= acc3b
+            for lane in 1:4
+                A[parent_r0 + lane - 1, parent_c1] -= first_acc[lane]
+                A[parent_r0 + lane - 1, parent_c2] -= second_acc[lane]
+            end
             row += 4
         end
         while row <= trailing_rows
