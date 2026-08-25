@@ -419,7 +419,7 @@ end
     w0 = workspace_requirements(T, :lu, (n=64,), cfg)
     w1 = workspace_requirements(T, :lu, (n=64,), cfg)
     @test w0 == w1
-    @test w0.factor == 64
+    @test w0.factor_capacity == 64
     wg = workspace_requirements(T, :gemm, (m=64, k=64, n=64), cfg)
     plan = gemm_plan(T, 64, 64, 64, cfg)
     @test wg.gemm_workers == plan.workers
