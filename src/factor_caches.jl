@@ -576,7 +576,7 @@ function _cache_apply_q!(destination, cache::MFRRQRCache{MF}; trans::Symbol=:N) 
     for step in steps
         _cache_apply_reflector!(destination, cache, step)
     end
-    return destination
+    return nothing
 end
 
 function _cache_apply_reflector!(destination::AbstractVector{MF}, cache, step::Int) where {MF<:MultiFloat}
@@ -611,15 +611,22 @@ function _cache_apply_reflector!(destination::AbstractMatrix{MF}, cache, step::I
     return nothing
 end
 
-function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; config) where {MF<:MultiFloat}
-    rank == 0 && return destination
+function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; trans::Symbol=:N, config) where {MF<:MultiFloat}
+    rank == 0 && return nothing
     if destination isa AbstractVector
-        leading = @view cache.factors[1:rank, 1:rank]
-        trsv!(destination, leading; uplo=:upper, trans=:N, diag=:nonunit, config=config)
+        if trans === :N
+            _trsv_leading_upper!(destination, cache.factors, rank)
+        else
+            _trsv_leading_upper_trans!(destination, cache.factors, rank)
+        end
     else
-        _trsm_leading_upper!(destination, cache.factors, rank)
+        if trans === :N
+            _trsm_leading_upper!(destination, cache.factors, rank)
+        else
+            _trsm_leading_upper_trans!(destination, cache.factors, rank)
+        end
     end
-    return destination
+    return nothing
 end
 
 # Count-aware cycle permutation over the fixed-capacity leaders buffer, so no
@@ -730,7 +737,8 @@ function apply_q!(
         throw(DimensionMismatch("apply_q! destination row count differs"))
     Base.mightalias(destination, cache.factors) &&
         throw(ArgumentError("apply_q! destination must not alias QR storage"))
-    return _cache_apply_q!(destination, cache; trans=trans)
+    _cache_apply_q!(destination, cache; trans=trans)
+    return destination
 end
 
 """
@@ -763,7 +771,8 @@ function solve_r!(
         iszero(cache.factors[index, index]) &&
             throw(LinearAlgebra.SingularException(index))
     end
-    return _cache_solve_r!(destination, cache, rank_value; config=config)
+    _cache_solve_r!(destination, cache, rank_value; trans=trans, config=config)
+    return destination
 end
 
 """

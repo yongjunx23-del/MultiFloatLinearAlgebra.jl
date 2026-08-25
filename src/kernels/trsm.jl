@@ -391,3 +391,45 @@ function _trsm_leading_upper!(B::AbstractMatrix{MF}, A::AbstractMatrix{MF}, rank
     end
     return B
 end
+
+# View-free transposed solve: R'[1:rank,1:rank] * B = B (R' is lower triangular,
+# so forward substitution over the columns of R). Matches
+# `trsm!(...; side=:left, uplo=:upper, trans=:T, diag=:nonunit)` with zero
+# allocation.
+function _trsm_leading_upper_trans!(B::AbstractMatrix{MF}, A::AbstractMatrix{MF}, rank::Int) where {MF<:MultiFloat}
+    @inbounds for column in axes(B, 2)
+        for row in 1:rank
+            value = B[row, column]
+            for k in 1:(row - 1)
+                value -= A[k, row] * B[k, column]
+            end
+            B[row, column] = value / A[row, row]
+        end
+    end
+    return B
+end
+
+# View-free vector solve: R[1:rank,1:rank] * x = x (backward substitution).
+function _trsv_leading_upper!(x::AbstractVector{MF}, A::AbstractMatrix{MF}, rank::Int) where {MF<:MultiFloat}
+    @inbounds for row in rank:-1:1
+        value = x[row]
+        for k in (row + 1):rank
+            value -= A[row, k] * x[k]
+        end
+        x[row] = value / A[row, row]
+    end
+    return x
+end
+
+# View-free transposed vector solve: R'[1:rank,1:rank] * x = x (forward
+# substitution over the columns of R).
+function _trsv_leading_upper_trans!(x::AbstractVector{MF}, A::AbstractMatrix{MF}, rank::Int) where {MF<:MultiFloat}
+    @inbounds for row in 1:rank
+        value = x[row]
+        for k in 1:(row - 1)
+            value -= A[k, row] * x[k]
+        end
+        x[row] = value / A[row, row]
+    end
+    return x
+end

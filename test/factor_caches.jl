@@ -551,3 +551,60 @@ end
         end
     end
 end
+
+@testset "RRQR cache solve_r! trans and apply_q! routes" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            n = 8
+            A = cache_diagdom(T, n)
+            qc = MFRRQRCache(T; config=cfg)
+            prepare!(qc, n, n)
+            factorize!(qc, A)
+            rank = n
+            # extract the leading R block
+            R = zeros(T, rank, rank)
+            for c in 1:rank, r in 1:c
+                R[r, c] = factor_matrix(qc)[r, c]
+            end
+
+            # R*x=b and R'*x=b (vector)
+            xref = T.(randn(rank))
+            bN = R * xref
+            xN = copy(bN)
+            solve_r!(xN, qc, rank; trans=:N)
+            @test max_relative_error(xN, xref) <= tolerance(T, 32rank)
+            bT = transpose(R) * xref
+            xT = copy(bT)
+            solve_r!(xT, qc, rank; trans=:T)
+            @test max_relative_error(xT, xref) <= tolerance(T, 32rank)
+
+            # R*X=B and R'*X=B (matrix)
+            Xref = T.(randn(rank, 3))
+            BN = R * Xref
+            XN = copy(BN)
+            solve_r!(XN, qc, rank; trans=:N)
+            @test max_relative_error(XN, Xref) <= tolerance(T, 32rank)
+            BT = transpose(R) * Xref
+            XT = copy(BT)
+            solve_r!(XT, qc, rank; trans=:T)
+            @test max_relative_error(XT, Xref) <= tolerance(T, 32rank)
+
+            # apply_q! round-trip :N/:T for vector and matrix
+            v = T.(randn(n))
+            vr = copy(v)
+            apply_q!(vr, qc; trans=:T)
+            apply_q!(vr, qc; trans=:N)
+            @test max_relative_error(vr, v) <= tolerance(T, 64n)
+            M = T.(randn(n, 3))
+            Mr = copy(M)
+            apply_q!(Mr, qc; trans=:T)
+            apply_q!(Mr, qc; trans=:N)
+            @test max_relative_error(Mr, M) <= tolerance(T, 64n)
+
+            # invalid trans throws
+            @test_throws ArgumentError solve_r!(copy(bN), qc, rank; trans=:bad)
+            @test_throws ArgumentError apply_q!(copy(v), qc; trans=:bad)
+        end
+    end
+end
