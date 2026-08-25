@@ -2448,6 +2448,7 @@ include("qr_delayed_norm.jl")
             :factor_cache_kinds,
             :factor_cache_ownership,
             :factor_cache_warm_vector_solve_zero_alloc,
+            :factor_cache_warm_matrix_solve_zero_alloc,
             :factor_metadata_ownership,
             :factor_matrix_ownership,
             :factorization_destructive,

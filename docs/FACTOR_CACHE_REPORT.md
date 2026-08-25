@@ -7,8 +7,7 @@ hot path.
 
 > **Honesty note.** This report states what the allocation gate actually
 > asserts and distinguishes *verified* claims from *status-under-work*. It does
-> **not** claim `factorize!` is zero-allocation, and it does **not** claim cache
-> solves are validated against an independent BigFloat oracle.
+> **not** claim cache solves are validated against an independent BigFloat oracle.
 
 ## Allocation
 

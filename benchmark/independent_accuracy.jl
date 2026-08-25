@@ -344,8 +344,7 @@ function check_ldlt(::Type{T}, n) where {T}
     e1 = _rel_err_vector(x, xbig)
     check("$tag vector solve rel err", e1 <= tol_rel(T), @sprintf("%.3e", e1))
 
-    # multi-RHS matrix solve (guarded: LDLT cache matrix solve is currently
-    # broken in the package, see report)
+    # multi-RHS matrix solve (validated: LDLT cache matrix solve now works)
     Xok, X = _safe_matrix_solve(cache, T, Bbig, n, 3)
     if Xok
         em = _rel_err_matrix(X, Xbig)

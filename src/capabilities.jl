@@ -66,7 +66,11 @@ function capabilities(
             cholesky=supported, lu=supported, ldlt=supported, rrqr=supported,
         ),
         factor_cache_ownership=:cache_owned,
+        # Warm-path zero-allocation facts. The allocation gate
+        # (benchmark/allocation_gate.jl) verifies these for x2/x3/x4; it does
+        # not test x1, so the claims are gated for the multi-limb types.
         factor_cache_warm_vector_solve_zero_alloc=supported,
+        factor_cache_warm_matrix_solve_zero_alloc=supported,
         factor_metadata_ownership=:factor_owned,
         factor_matrix_ownership=:borrowed_input,
         factorization_destructive=true,

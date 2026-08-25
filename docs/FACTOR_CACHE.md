@@ -16,9 +16,9 @@ factor. Callers that need a persistent factor continue to use the standalone
 | Cache | Factorization | Owned storage |
 |---|---|---|
 | `MFCholeskyCache{MF}` | lower Cholesky | factor matrix, status, frozen `KernelConfig` |
-| `MFLUCache{MF}` | partial-pivoting LU | factor matrix, pivots, `GemmWorkspace`, frozen `KernelConfig` |
-| `MFLDLTCache{MF}` | symmetric-indefinite LDLT | factor matrix, `dsub`, Bunch-Kaufman pivots/blocks, weighted panel, `GemmWorkspace`, frozen `KernelConfig` |
-| `MFRRQRCache{MF}` | pivoted Householder QR | factor matrix, reflectors, permutation + cycle leaders, norm scratch, GEMM workspace, frozen `KernelConfig` |
+| `MFLUCache{MF}` | partial-pivoting LU | factor matrix, pivots, frozen `KernelConfig` |
+| `MFLDLTCache{MF}` | symmetric-indefinite LDLT | factor matrix, `dsub`, Bunch-Kaufman pivots/blocks, weighted panel, frozen `KernelConfig` |
+| `MFRRQRCache{MF}` | pivoted Householder QR | factor matrix, reflectors, permutation + cycle leaders, norm scratch, frozen `KernelConfig` |
 
 Every cache implements `AbstractMFFactorCache{MF}` and the uniform interface
 below. `MF` is always a Float64-based `MultiFloat` (`Float64x2/3/4`); other base
@@ -29,7 +29,7 @@ types and x5-x8 are rejected at construction.
 ```julia
 cache = MFCholeskyCache(T; config=KernelConfig())   # or MFLUCache / MFLDLTCache / MFRRQRCache
 prepare!(cache, n; nrhs=1)                           # explicit reserve; RRQR also prepare!(cache, m, n)
-factorize!(cache, A; check=true, config=cache.config) # overwrite owned storage; RRQR also accepts `threads=`
+factorize!(cache, A; check=true, config=cache.config) # overwrite owned storage
 solve!(x, cache, b)                                  # vector RHS, caller-owned x
 solve!(X, cache, B)                                  # multi-RHS, caller-owned X
 factor_status(cache)                                 # 0 success; -1 nonfinite; >0 failure location; -2 invalidated
