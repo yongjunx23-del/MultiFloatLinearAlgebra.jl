@@ -167,6 +167,28 @@ end
         s3 = cache_allocated(() -> solve!(X2, c, B))
         s4 = cache_allocated(() -> solve!(X2, c, B))
         @test s3 == s4
+
+        # LDLT matrix solve (correctness + 0-byte warm)
+        ind = cache_indefinite(T, n)
+        ldref = MFLA.ldiv!(copy(B), MFLA.ldlt!(copy(ind); check=false, config=cfg), B)
+        ldc = MFLDLTCache(T; config=cfg)
+        prepare!(ldc, n)
+        factorize!(ldc, ind)
+        X3 = zeros(T, n, nrhs)
+        solve!(X3, ldc, B)
+        @test max_relative_error(X3, ldref) <= tolerance(T, 256)
+        @test cache_allocated(() -> solve!(X3, ldc, B)) == 0
+
+        # RRQR matrix solve (correctness + 0-byte warm)
+        qa = cache_diagdom(T, n)
+        qref = MFLA.ldiv!(copy(B), MFLA.rrqr!(copy(qa)), B)
+        qc = MFRRQRCache(T; config=cfg)
+        prepare!(qc, n)
+        factorize!(qc, qa)
+        X4 = zeros(T, n, nrhs)
+        solve!(X4, qc, B)
+        @test max_relative_error(X4, qref) <= tolerance(T, 256)
+        @test cache_allocated(() -> solve!(X4, qc, B)) == 0
     end
 end
 
