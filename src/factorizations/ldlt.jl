@@ -632,6 +632,58 @@ function _build_ldlt_weighted_panel!(
 end
 
 """
+    _ldlt_factorize_core!(A, dsub, pivots, blocks, weighted, config, check)
+
+Shared symmetric-indefinite `L*D*L'` numerical core. The lower triangle of `A`
+is authoritative on input; `A` is overwritten in place with the factor, and the
+Bunch-Kaufman step pivots / block grammar / subdiagonal `D` entries are written
+into `pivots` / `blocks` / `dsub` (each length `n`). `weighted` is the
+blocked-panel weighted storage (a caller-owned matrix of width
+`block_size + 1` when the blocked route is selected; ignored otherwise).
+Returns the `info` status (`0` success, `-1` nonfinite, or the failed pivot
+index) together with `original_maximum` from the input's lower triangle. When
+`check=false` it never throws after partial writes. This is the single core
+shared by the standalone [`ldlt!`](@ref) and the factor cache.
+"""
+function _ldlt_factorize_core!(
+    A::AbstractMatrix{MF},
+    dsub::AbstractVector{MF},
+    pivots::AbstractVector{Int},
+    blocks::AbstractVector{UInt8},
+    weighted::AbstractMatrix{MF},
+    config::KernelConfig,
+    check::Bool,
+) where {MF<:MultiFloat}
+    n = size(A, 1)
+    if !_lower_triangle_finite(A)
+        check && throw(DomainError(A, "ldlt!: input matrix contains non-finite entries"))
+        return (-1, zero(MF))
+    end
+    _mirror_lower_to_upper!(A)
+    original_maximum = _lower_maximum_abs(A)
+
+    plan = ldlt_plan(MF, n, config)
+    block_capacity = plan.strategy === :blocked ? plan.block_size : 0
+
+    fill!(dsub, zero(MF))
+    fill!(blocks, UInt8(0))
+    @inbounds for index in 1:n
+        pivots[index] = index
+    end
+
+    alpha = (one(MF) + sqrt(MF(17))) / MF(8)
+    info = if plan.strategy === :blocked
+        _ldlt_factorize_blocked_viewfree!(A, dsub, pivots, blocks, weighted, alpha, plan, config)
+    else
+        _factor_ldlt_unblocked!(A, dsub, pivots, blocks, alpha)
+    end
+    if !iszero(info) && check
+        throw(LinearAlgebra.SingularException(info))
+    end
+    return info, original_maximum
+end
+
+"""
     ldlt!(A; check=true, config=KernelConfig(), workspace=nothing)
 
 Symmetric-indefinite `L*D*L'` factorization for dense MultiFloat matrices.
@@ -679,34 +731,16 @@ function ldlt!(
             zero(MF),
         )
     end
-    _mirror_lower_to_upper!(A)
-
-    original_maximum = _lower_maximum_abs(A)
+    # Non-finite handled above; run the single shared numerical core.
     plan = ldlt_plan(MF, n, config)
     block_capacity = plan.strategy === :blocked ? plan.block_size : 0
-
     dsub, pivots, blocks, weighted_storage = _prepare_ldlt_metadata!(
         MF, n, block_capacity, workspace,
     )
-    alpha = (one(MF) + sqrt(MF(17))) / MF(8)
-    info = if plan.strategy === :blocked
-        _factor_ldlt_blocked!(
-            A,
-            dsub,
-            pivots,
-            blocks,
-            weighted_storage::Matrix{MF},
-            alpha,
-            plan,
-            config,
-        )
-    else
-        _factor_ldlt_unblocked!(A, dsub, pivots, blocks, alpha)
-    end
-
-    if !iszero(info) && check
-        throw(LinearAlgebra.SingularException(info))
-    end
+    weighted = weighted_storage === nothing ? Matrix{MF}(undef, 0, 0) : weighted_storage
+    info, original_maximum = _ldlt_factorize_core!(
+        A, dsub, pivots, blocks, weighted, config, check,
+    )
     owned_dsub, owned_pivots, owned_blocks =
         _owned_ldlt_metadata(dsub, pivots, blocks, workspace)
     return MFLDLT{

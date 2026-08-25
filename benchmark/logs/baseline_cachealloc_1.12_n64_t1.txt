@@ -1,0 +1,14 @@
+MFLA factor-cache allocation audit
+Julia 1.12.6, threads=1, n=64
+MFLA-cache       x2 threads=1 cholesky solve=0 factorize=144 (stable=true)
+MFLA-cache       x2 threads=1 lu solve=0 factorize=912/912 (stable=true)
+MFLA-cache       x2 threads=1 ldlt solve=0
+
+MFLA-cache       x3 threads=1 cholesky solve=0 factorize=144 (stable=true)
+MFLA-cache       x3 threads=1 lu solve=0 factorize=912/912 (stable=true)
+MFLA-cache       x3 threads=1 ldlt solve=0
+
+MFLA-cache       x4 threads=1 cholesky solve=0 factorize=144 (stable=true)
+MFLA-cache       x4 threads=1 lu solve=0 factorize=1008/1008 (stable=true)
+MFLA-cache       x4 threads=1 ldlt solve=0
+

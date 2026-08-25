@@ -61,6 +61,12 @@ function capabilities(
         mixed_residual_target_types=mixed_residual_target_types,
         refinement_correction=supported,
         reusable_workspace=supported,
+        factor_cache=supported,
+        factor_cache_kinds=(
+            cholesky=supported, lu=supported, ldlt=supported, rrqr=supported,
+        ),
+        factor_cache_ownership=:cache_owned,
+        factor_cache_warm_vector_solve_zero_alloc=supported,
         factor_metadata_ownership=:factor_owned,
         factor_matrix_ownership=:borrowed_input,
         factorization_destructive=true,

@@ -126,6 +126,45 @@ See [`docs/SOLVER_BACKEND_CONTRACT.md`](docs/SOLVER_BACKEND_CONTRACT.md) and
 [`docs/SDPX_PROVIDER_READINESS.md`](docs/SDPX_PROVIDER_READINESS.md) for the
 more detailed backend contract.
 
+## Reusable factor cache
+
+For repeated factor/solve cycles, the factor-cache layer
+(`MFCholeskyCache`, `MFLUCache`, `MFLDLTCache`, `MFRRQRCache`) owns every
+factorization array, so the warm hot path does not create RHS scratch, factor
+wrappers, or metadata copies:
+
+```julia
+using MultiFloatLinearAlgebra, MultiFloats
+cache = MFLUCache(Float64x2)
+prepare!(cache, n)          # explicit reserve (allocates)
+factorize!(cache, A)        # reuses owned storage, no matrix copy
+solve!(x, cache, b)         # 0-byte warm vector solve; repeated RHS is free
+factorize!(cache, A2)       # same size: only overwrites storage
+invalidate!(cache)          # explicit refresh marker after mutating A in place
+```
+
+`prepare!` is the only growth point; the factorization hot path never silently
+resizes. A cache is fail-closed: `factorize!` invalidates before touching
+storage, `issuccess` is true only after a complete success, and `solve!`
+refuses (throws) unless the cache is successful. A failed cache is recovered by
+replacing `A` (same size) and re-running `factorize!`. A cache's configuration
+is frozen at construction; change it with `reconfigure!` + `prepare!`, never by
+passing a different `config` to the hot path. Pure
+`workspace_requirements` / `factor_cache_requirements` queries let callers
+reserve all storage before any numerical work.
+
+**Allocation status (honest).** Warm **vector** `solve!` is 0-byte; warm
+**matrix** `solve!` allocates only the shared triangular-kernel dispatch floor
+(bounded and identical across calls). `factorize!` is **not** zero-allocation —
+it still allocates a small non-zero amount from kernel dispatch and `@view`
+subarray creation, which is under active elimination and tracked by the
+allocation gate.
+
+See [`docs/FACTOR_CACHE.md`](docs/FACTOR_CACHE.md) for the full API and
+lifecycle, [`docs/FACTOR_CACHE_LIFECYCLE.md`](docs/FACTOR_CACHE_LIFECYCLE.md)
+for the state diagrams, and [`docs/FACTOR_CACHE_REPORT.md`](docs/FACTOR_CACHE_REPORT.md)
+for the allocation before/after and accuracy results.
+
 ## Testing
 
 ```julia

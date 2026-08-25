@@ -43,18 +43,22 @@ function _multifloat_matrix(A)
     return matrix
 end
 
-function _factorize(alg::MultiFloatLU, A)
-    return MFLA.lu!(Matrix(_multifloat_matrix(A)); check=false, config=alg.config)
-end
-
-function _factorize(alg::MultiFloatCholesky, A)
-    return MFLA.cholesky!(Matrix(_multifloat_matrix(A)); check=false, config=alg.config)
-end
-
-function _empty_factor(alg, A)
-    matrix = _multifloat_matrix(A)
-    placeholder = Matrix{eltype(matrix)}(undef, 0, 0)
-    return _factorize(alg, placeholder)
+# Build the reusable factor cache at the *matrix* size so the first `solve!`
+# writes into preallocated storage instead of growing it. `init_cacheval` is
+# called by `LinearSolve.init`, so `prepare!` here reserves the O(n^2) storage
+# (factor matrix, pivots, workspaces) up front. No O(n^3) factorization runs at
+# init time: the cache's status is left `_FACTOR_CACHE_INVALID`, and the first
+# `solve!` performs the single numeric factorization.
+function _build_cache(alg::Union{MultiFloatLU,MultiFloatCholesky}, A)
+    MF = eltype(_multifloat_matrix(A))
+    n = size(A, 1)
+    if alg isa MultiFloatLU
+        cache = MFLA.MFLUCache(MF; config=alg.config)
+    else
+        cache = MFLA.MFCholeskyCache(MF; config=alg.config)
+    end
+    MFLA.prepare!(cache, n)
+    return cache
 end
 
 function LinearSolve.init_cacheval(
@@ -70,9 +74,10 @@ function LinearSolve.init_cacheval(
     verbose,
     assumptions,
 )
-    # `LinearCache` fixes the cache-value field type at initialization. An empty
-    # factor supplies that type without doing the real O(n^3) factorization twice.
-    return _empty_factor(alg, A)
+    # `LinearCache` fixes the cache-value field type at initialization; build the
+    # cache at the matrix size (reserving O(n^2) storage only) without running
+    # the real O(n^3) factorization.
+    return _build_cache(alg, A)
 end
 
 function _failure_solution(cache, alg)
@@ -85,18 +90,36 @@ function _failure_solution(cache, alg)
     )
 end
 
-function _solve!(cache, alg)
-    factor = cache.cacheval
-    if cache.isfresh
-        factor = _factorize(alg, cache.A)
-        cache.cacheval = factor
-        MFLA.issuccess(factor) || return _failure_solution(cache, alg)
-        cache.isfresh = false
-    elseif !MFLA.issuccess(factor)
-        return _failure_solution(cache, alg)
+function _factorize!(cache, alg)
+    cacheval = cache.cacheval
+    A = _multifloat_matrix(cache.A)
+    n = size(A, 1)
+    # Only a size change (e.g. a `reinit!` with a larger A) re-prepares storage;
+    # an ordinary in-place A update at the init-time size overwrites the owned
+    # factor matrix in place and never grows it.
+    if size(MFLA.factor_matrix(cacheval), 1) != n
+        MFLA.prepare!(cacheval, n)
     end
+    # check=false: a numerical breakdown returns a non-zero status instead of
+    # throwing, and `factorize!` is fail-closed (it invalidates the cache before
+    # touching storage), so a failed factorization can never leave a stale
+    # success behind.
+    MFLA.factorize!(cacheval, A; check=false, config=alg.config)
+    return cacheval
+end
 
-    MFLA.ldiv!(cache.u, factor, cache.b; config=alg.config)
+function _solve!(cache, alg)
+    cacheval = cache.cacheval
+    if cache.isfresh
+        _factorize!(cache, alg)
+        # Only a successful factorization is a usable cache; on failure keep
+        # `isfresh` true so a caller can replace A and retry, and return Failure.
+        MFLA.issuccess(cacheval) || return _failure_solution(cache, alg)
+        cache.isfresh = false
+    end
+    MFLA.issuccess(cacheval) || return _failure_solution(cache, alg)
+
+    MFLA.solve!(cache.u, cacheval, cache.b; config=alg.config)
     return SciMLBase.build_linear_solution(
         alg,
         cache.u,
@@ -104,6 +127,33 @@ function _solve!(cache, alg)
         cache;
         retcode=SciMLBase.ReturnCode.Success,
     )
+end
+
+"""
+    refresh!(cache::LinearCache)
+
+Mark a `LinearCache` produced by a `MultiFloatLU` / `MultiFloatCholesky`
+algorithm as requiring re-factorization on the next `solve!`. Call this after
+mutating `cache.A` **in place** (modifying entries of the matrix object the cache
+already holds) instead of replacing it with `cache.A = newA`.
+
+The two A-update routes are equivalent and both reuse the cache's owned factor
+storage:
+
+  - `cache.A = newA` (or `reinit!(cache; A = newA)`) — the standard LinearSolve
+    cache-update path; it already sets the freshness flag through
+    `Base.setproperty!`.
+  - `refresh!(cache)` after in-place mutation — the only route that works when
+    the matrix object is mutated rather than reassigned.
+
+On the next `solve!` the cache re-factorizes exactly once into its existing
+factor matrix (no reallocation at the same size) and is fail-closed: a failed
+factorization returns `ReturnCode.Failure` and never leaves a stale success
+behind.
+"""
+function refresh!(cache::LinearSolve.LinearCache)
+    cache.isfresh = true
+    return cache
 end
 
 function SciMLBase.solve!(

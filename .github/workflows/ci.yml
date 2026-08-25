@@ -15,14 +15,15 @@ concurrency:
 
 jobs:
   test:
-    env:
-      JULIA_NUM_THREADS: "4"
     strategy:
       fail-fast: false
       matrix:
         julia-version: ["1.9", "1.10", "1.11", "1.12"]
         os: [ubuntu-latest, macos-14]
+        threads: ["1", "4"]
     runs-on: ${{ matrix.os }}
+    env:
+      JULIA_NUM_THREADS: ${{ matrix.threads }}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -31,3 +32,23 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+
+  allocation-audit:
+    name: Allocation audit (factor cache + kernels)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+      - uses: julia-actions/cache@v2
+      - name: Instantiate package environment
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run repeated-call allocation audit
+        run: julia -t 1 --project=. benchmark/allocation_audit.jl 64
+      - name: Run factor-cache allocation audit
+        run: julia -t 1 --project=. benchmark/factor_cache_audit.jl 64
+      - name: Run allocation regression gate (hard)
+        # Fails the workflow on nonzero exit if any warm-path measurement
+        # exceeds its baked regression limit. See benchmark/allocation_gate.jl.
+        run: julia -t 1 --project=. benchmark/allocation_gate.jl --check

@@ -120,12 +120,73 @@ vector/multi-RHS solves, numerical diagnostics, residual/backward error,
 explicit promoted residual, one requested correction, workspace reuse, and
 capability facts are present and adversarially tested.
 
-It is not, and should not become, a complete SDPX kernel namespace. SDPX still
-requires its solver-specific sparse assembly, Q3/SOC algebra, iterate updates,
-line search, precision/fallback orchestration, and certification code.
+## Factor-cache and LinearSolve provider readiness
 
-The next logical development step is therefore the downstream SDPX adapter and
-duplicate-kernel A/B removal, not speculative expansion of MFLA. If MFLA work
-continues independently, evidence should choose among generalized update
-closure, more formal arithmetic proof, or a concrete new provider caller; no
-current audit evidence justifies hidden policy or a broad architecture rewrite.
+The factor-cache layer (`AbstractMFFactorCache` and
+`MFCholeskyCache`/`MFLUCache`/`MFLDLTCache`/`MFRRQRCache`) adds the reusable,
+low-allocation route solver code needs without touching the safe standalone
+factor API. It is a **hardened provider surface — not a "final" cache**. It is
+included here because it is stable enough for SDPX to depend on, while its
+allocation profile still has explicit remaining work. See
+[`FACTOR_CACHE.md`](FACTOR_CACHE.md) for the full API/lifecycle and
+[`FACTOR_CACHE_LIFECYCLE.md`](FACTOR_CACHE_LIFECYCLE.md) for the state diagrams.
+
+Solver-facing facts for SDPX:
+
+- **Fail-closed lifecycle.** `factorize!` invalidates before touching storage;
+  only a complete success sets `issuccess`; every `solve!` refuses unless
+  successful; a failed cache is recovered by replacing `A` (same size) and
+  re-running `factorize!`.
+- **Reusable factor storage.** A cache owns its factor matrix and metadata.
+  Repeated `factorize!` never grows owned storage; **vector and matrix** `solve!`
+  and all four `factorize!` paths (Cholesky / LU / LDLT incl. blocked / RRQR
+  incl. blocked) allocate **0 bytes** on the warm single-thread path, enforced
+  by the `benchmark/allocation_gate.jl --check` CI gate. `A` value updates reuse
+  storage; size growth is explicit through `prepare!`.
+- **Frozen configuration.** A cache's `KernelConfig` is fixed; changing it goes
+  through `reconfigure!` + `prepare!`, never through a hot-path `config=` that
+  differs from `cache.config`.
+- **Exact pre-allocation queries.** `workspace_requirements(::Type{MF},
+  operation, shape, config)` and `factor_cache_requirements(::Type{MF}, kind,
+  shape, config)` are pure, exact (type- and config-dependent) queries SDPX can
+  call once, before any numerical work, to reserve every array the warm path
+  needs; `factor_cache_capacity(cache)` reports what is allocated.
+- **Borrowed, not persistent.** Cache factors are borrowed and invalidated by
+  the next `factorize!`. SDPX must not treat a cache factor as a long-lived
+  object; it keeps the standalone factor API for that.
+- **No solver policy in MFLA.** The cache does not choose rank, refinement
+  count, precision policy, or fallback. A failed cache is queryable and
+  recoverable by re-factorizing a replacement `A`; MFLA never silently falls
+  back.
+
+### Explicit remaining work (not yet a "final" cache)
+
+- **Threaded task allocation.** Single-thread numerical buffers are all
+  0-byte; the only warm-path allocation that remains is the `@sync`/
+  `Threads.@spawn` task objects on threaded (>1 worker) routes and the public
+  `gemm!`/`gemmt!` inspectable-route `GemmPlan` struct (a `Symbol`-based route
+  descriptor, separate from the cache core). These are reported separately and
+  are the explicit remaining work.
+
+### LinearSolve weak-dep extension
+
+MFLA also exposes an optional LinearSolve.jl extension (`MultiFloatLU`,
+`MultiFloatCholesky`, loaded by `using LinearSolve`). LinearSolve remains a weak
+dependency and never enters the MFLA core. The extension's `LinearCache` holds
+an MFLA factor cache: `init` builds an empty cache (no double numerical
+factorization), an unchanged `A` reuses the factor across RHS updates, an `A`
+update re-factorizes into existing storage, and a failed factorization reports
+`ReturnCode.Failure` while leaving the cache fresh so a caller can replace `A`
+and retry. SDPX may use it to drive dense MultiFloat solves through the standard
+SciML interface without re-implementing factor caching.
+
+### SDPX dependency scope
+
+The factor-cache surface is **safe for SDPX to depend on** for the dense
+MultiFloat factor/solve/residual surface **without importing solver policy**:
+SDPX keeps formulation, rank/refinement/precision/fallback choice, sparse
+assembly, Q3/SOC algebra, iterate updates, line search, and certification code.
+The remaining MFLA work (factorize zero-allocation completion, threaded-task
+allocation) is performance work, not a contract change, so it does not block
+SDPX adoption. The cache should **not** be described as "final" in downstream
+dependency decisions until that allocation work lands.
