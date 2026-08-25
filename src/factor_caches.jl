@@ -21,8 +21,9 @@ end
 """
     prepare!(cache, n; nrhs=1)
 
-Reserve factor storage for an `n`-by-`n` matrix. `nrhs` is accepted for a
-uniform solver-facing signature and records intended multi-RHS capacity; growth
+Reserve factor storage for an `n`-by-`n` matrix. `nrhs` is a reserved no-op
+accepted for a uniform solver-facing signature: it does not affect storage or
+the warm path, because `solve!` writes into caller-owned destinations. Growth
 here is explicit and allowed to allocate. The hot `factorize!` path never grows.
 """
 function prepare!(cache::MFCholeskyCache{MF}, n::Integer; nrhs::Integer=1) where {MF<:MultiFloat}

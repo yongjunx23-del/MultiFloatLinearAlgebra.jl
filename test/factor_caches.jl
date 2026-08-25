@@ -432,6 +432,114 @@ end
     @test_throws ArgumentError workspace_requirements(T, :bogus, (n=8,), cfg)
 end
 
+@testset "workspace_requirements route coverage" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            # blocked vs unblocked LDLT ldlt_block capacity
+            blocked = KernelConfig(thread_count=1, ldlt_strategy=:blocked, ldlt_block=8)
+            unblocked = KernelConfig(thread_count=1, ldlt_strategy=:unblocked)
+            wb = workspace_requirements(T, :ldlt, (n=64,), blocked)
+            @test wb.ldlt_block_capacity == 8
+            wu = workspace_requirements(T, :ldlt, (n=64,), unblocked)
+            @test wu.ldlt_block_capacity == 0
+            # :auto above the blocked crossover reserves the block size
+            auto_big = KernelConfig(thread_count=1)
+            wauto = workspace_requirements(T, :ldlt, (n=1024,), auto_big)
+            @test wauto.ldlt_block_capacity > 0
+
+            # direct vs packed GEMM worker/capacity
+            direct = KernelConfig(thread_count=1, gemm_strategy=:direct)
+            packed = KernelConfig(thread_count=1, gemm_strategy=:packed, gemm_panel_columns=6)
+            wd = workspace_requirements(T, :gemm, (m=64, k=64, n=64), direct)
+            wp = workspace_requirements(T, :gemm, (m=64, k=64, n=64), packed)
+            @test wd.gemm_capacity == 0
+            @test wp.gemm_capacity > 0
+            @test wp.gemm_workers == gemm_plan(T, 64, 64, 64, packed).workers
+
+            # packed LU reserves the trailing-update GEMM capacity
+            wlu = workspace_requirements(T, :lu, (n=64,), packed)
+            @test wlu.gemm_capacity > 0
+
+            # RRQR square/tall/wide factor and qr_ftranspose/qr_aux
+            for (m, n) in ((64, 64), (64, 48), (48, 64))
+                wr = workspace_requirements(T, :rrqr, (m=m, n=n), unblocked)
+                @test wr.factor_capacity == max(m, n)
+                @test wr.qr_ftranspose_rows == min(16, min(m, n))
+                @test wr.qr_ftranspose_cols == n
+                @test wr.qr_aux == min(16, min(m, n))
+            end
+
+            # splat contract: ensure_workspace_capacity!(ws; req...) reserves
+            # exactly what the requirements report.
+            ws = MFWorkspace(T)
+            req = workspace_requirements(T, :rrqr, (m=256, n=256), unblocked)
+            ensure_workspace_capacity!(ws; req...)
+            cap = workspace_capacity(ws)
+            @test cap.factor_capacity >= req.factor_capacity
+            @test cap.qr_ftranspose_rows >= req.qr_ftranspose_rows
+            @test cap.qr_ftranspose_cols >= req.qr_ftranspose_cols
+            @test cap.qr_aux >= req.qr_aux
+        end
+    end
+end
+
+@testset "factor cache reuse (large->small, blocked->unblocked)" begin
+    for T in (Float64x2, Float64x3)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            # large -> small reuse: capacity satisfies the smaller requirement
+            for kind in (:cholesky, :lu, :ldlt, :rrqr)
+                cache = if kind === :cholesky
+                    MFCholeskyCache(T; config=cfg)
+                elseif kind === :lu
+                    MFLUCache(T; config=cfg)
+                elseif kind === :ldlt
+                    MFLDLTCache(T; config=cfg)
+                else
+                    MFRRQRCache(T; config=cfg)
+                end
+                big = kind === :cholesky ? cache_spd(T, 64) :
+                      kind === :ldlt ? cache_indefinite(T, 64) : cache_diagdom(T, 64)
+                small = kind === :cholesky ? cache_spd(T, 32) :
+                        kind === :ldlt ? cache_indefinite(T, 32) : cache_diagdom(T, 32)
+                if kind === :rrqr
+                    prepare!(cache, 64, 64)
+                    factorize!(cache, big)
+                    prepare!(cache, 32, 32)
+                    factorize!(cache, small)
+                else
+                    prepare!(cache, 64)
+                    factorize!(cache, big)
+                    prepare!(cache, 32)
+                    factorize!(cache, small)
+                end
+                @test issuccess(cache)
+                # capacity satisfies the smaller requirement (>=, not ==)
+                req_shape = kind === :rrqr ? (m=32, n=32) : (n=32,)
+                req = factor_cache_requirements(T, kind, req_shape, cfg)
+                cap = factor_cache_capacity(cache)
+                @test cap.factor_matrix_elements >= req.factor_matrix_elements
+                @test cap.ftranspose.rows >= req.ftranspose.rows
+                @test cap.ftranspose.cols >= req.ftranspose.cols
+                @test cap.auxiliary >= req.auxiliary
+            end
+
+            # LDLT blocked -> unblocked reconfigure + prepare reuse
+            blocked = KernelConfig(thread_count=1, ldlt_strategy=:blocked, ldlt_block=8)
+            unblocked = KernelConfig(thread_count=1, ldlt_strategy=:unblocked)
+            ldc = MFLDLTCache(T; config=blocked)
+            prepare!(ldc, 32)
+            factorize!(ldc, cache_indefinite(T, 32))
+            @test issuccess(ldc)
+            reconfigure!(ldc, unblocked)
+            prepare!(ldc, 32)
+            factorize!(ldc, cache_indefinite(T, 32))
+            @test issuccess(ldc)
+            @test ldc.config.ldlt_strategy == :unblocked
+        end
+    end
+end
+
 @testset "factor cache requirements/capacity consistency" begin
     for T in (Float64x2, Float64x3, Float64x4), kind in (:cholesky, :lu, :ldlt, :rrqr)
         for cfg in (KernelConfig(thread_count=1), KernelConfig(thread_count=2))

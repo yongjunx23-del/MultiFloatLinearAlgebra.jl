@@ -2472,6 +2472,8 @@ include("qr_delayed_norm.jl")
                 :concurrent_factor_workspace, :syrk_authoritative_triangle,
                 :syrk_inactive_triangle, :factor_cache_kinds,
                 :factor_cache_ownership,
+                :factor_cache_warm_vector_solve_zero_alloc,
+                :factor_cache_warm_matrix_solve_zero_alloc,
             )),
             expected_properties,
         )
@@ -2506,6 +2508,10 @@ include("qr_delayed_norm.jl")
             @test !first_query.concurrent_factor_workspace
             @test first_query.syrk_authoritative_triangle === :lower
             @test first_query.syrk_inactive_triangle === :preserved
+            # The warm-path zero-allocation facts are gated to the multi-limb
+            # types the allocation gate verifies (x2/x3/x4); x1 is not claimed.
+            @test first_query.factor_cache_warm_vector_solve_zero_alloc == (limbs >= 2)
+            @test first_query.factor_cache_warm_matrix_solve_zero_alloc == (limbs >= 2)
             for property in operation_properties
                 property === :mixed_precision_residual && continue
                 @test getproperty(first_query, property)
