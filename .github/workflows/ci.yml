@@ -55,7 +55,7 @@ jobs:
         with:
           version: ${{ matrix.julia-version }}
       - uses: julia-actions/cache@v2
-      - name: Build temp environment with pinned LinearSolve
+      - name: Run LinearSolve extension tests with pinned version
         run: |
           julia --project=. -e '
             using Pkg
@@ -65,10 +65,6 @@ jobs:
             Pkg.add("MultiFloats")
             Pkg.add(name="SciMLBase", version="2")
             Pkg.add("Test"); Pkg.add("Random"); Pkg.add("LinearAlgebra")
-          '
-      - name: Run LinearSolve extension tests
-        run: |
-          julia --project=. -e '
             using Test, Random, LinearAlgebra, MultiFloats, MultiFloatLinearAlgebra,
                   LinearSolve, SciMLBase
             Random.seed!(0x5eed)
