@@ -328,14 +328,15 @@ end
 
 function factor_diagnostics(cache::MFLUCache{MF}) where {MF<:MultiFloat}
     state = factor_state(cache)
-    if state === :invalidated || state === :reconfigure_requires_prepare
+    if state === :invalidated || state === :reconfigure_requires_prepare ||
+       state === :nonfinite_input
         return (
             kind=:lu, status=factor_status(cache), state=state, success=false,
             precision=factor_precision(cache), provider=factor_provider(cache),
             failure_location=nothing, accepted_pivots=0,
             pivots=nothing, minimum_pivot=nothing, maximum_pivot=nothing,
             original_maximum=nothing, maximum_u=nothing, pivot_growth=nothing,
-            finite=nothing,
+            finite=state === :nonfinite_input ? false : nothing,
         )
     end
     accepted = cache.status > 0 ? cache.status - 1 :
@@ -368,7 +369,8 @@ end
 
 function factor_diagnostics(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
     state = factor_state(cache)
-    if state === :invalidated || state === :reconfigure_requires_prepare
+    if state === :invalidated || state === :reconfigure_requires_prepare ||
+       state === :nonfinite_input
         return (
             kind=:ldlt, status=factor_status(cache), state=state, success=false,
             precision=factor_precision(cache), provider=factor_provider(cache),
@@ -376,7 +378,7 @@ function factor_diagnostics(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
             pivots=nothing, blocks=nothing, inertia=nothing,
             minimum_block_eigenvalue_magnitude=nothing, minimum_scaled_block=nothing,
             original_maximum=nothing, maximum_block_entry=nothing, block_growth=nothing,
-            finite=nothing,
+            finite=state === :nonfinite_input ? false : nothing,
         )
     end
     one_by_one = 0
@@ -468,13 +470,15 @@ function factor_diagnostics(
     rtol::Real=zero(MF),
 ) where {MF<:MultiFloat}
     state = factor_state(cache)
-    if state === :invalidated || state === :reconfigure_requires_prepare
+    if state === :invalidated || state === :reconfigure_requires_prepare ||
+       state === :nonfinite_input
         return (
             kind=:rrqr, status=factor_status(cache), state=state, success=false,
             precision=factor_precision(cache), provider=factor_provider(cache),
             failure_location=nothing, permutation=nothing, rdiag=nothing,
             minimum_rdiag=nothing, maximum_rdiag=nothing, rdiag_spread=nothing,
-            rank_at_threshold=0, atol=MF(atol), rtol=MF(rtol), finite=nothing,
+            rank_at_threshold=0, atol=MF(atol), rtol=MF(rtol),
+            finite=state === :nonfinite_input ? false : nothing,
         )
     end
     diagonal_count = min(size(cache.factors)...)

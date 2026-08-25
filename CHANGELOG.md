@@ -4,7 +4,33 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2025-08-25
+
+### Final contract cleanup
+
+- **Exact `workspace_requirements`.** `workspace_requirements(::Type{MF},
+  operation, shape, config)` now reports the exact scratch the standalone
+  `lu!` / `ldlt!` / `rrqr!` cores need so `ensure_workspace_capacity!(ws;
+  req...)` makes the first call not grow: blocked LDLT reports
+  `ldlt_block_capacity`, packed LU reports the trailing-update GEMM
+  workers/capacity, and blocked RRQR reports `qr_ftranspose_rows/cols` and
+  `qr_aux`. `MFWorkspace` gained `qr_ftranspose`/`qr_aux` capacity tracking,
+  and the field names were unified (`factor_capacity` / `ldlt_block_capacity` /
+  `gemm_capacity`) across `workspace_requirements`, `ensure_workspace_capacity!`,
+  and `workspace_capacity` so the splat contract holds.
+- **Deterministic failure diagnostics.** Cache metadata (LU `ipiv`, LDLT
+  `dsub`/`pivots`/`blocks`, RRQR `tau`/`permutation`) is now identity/zero
+  initialized before the nonfinite check, so a nonfinite failure no longer
+  leaks stale pivots/blocks/inertia/permutation into `factor_diagnostics`.
+  Nonfinite diagnostics return `nothing` for the metadata fields (with
+  `finite=false`); LU singular diagnostics expose an identity pivot tail
+  instead of uninitialized garbage.
+- **Regression tests.** Added `workspace_requirements` route coverage
+  (blocked/unblocked LDLT, direct/packed GEMM, RRQR square/tall/wide),
+  cache-reuse tests (large→small, LDLT blocked→unblocked) asserting
+  `capacity >= requirements`, and gated the x1 zero-allocation capability facts
+  to the multi-limb types the allocation gate verifies (x2/x3/x4). The `nrhs`
+  `prepare!` argument is documented as a reserved no-op.
 
 ### Factor-cache contract hardening
 
@@ -76,5 +102,5 @@ failure.
 
 ### Versioning
 
-A **minor version bump** (e.g. `0.2.0` → `0.3.0`) is warranted once the
-validation suite passes on the hardened factor-cache contract.
+This release (0.3.0) is the minor bump warranted once the validation suite
+passes on the hardened factor-cache contract.

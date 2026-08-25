@@ -84,6 +84,8 @@ mutable struct MFWorkspace{MF<:MultiFloat}
     qr_aux::Vector{MF}
     factor_capacity::Int
     ldlt_block_capacity::Int
+    qr_ftranspose_capacity::Tuple{Int,Int}
+    qr_aux_capacity::Int
 end
 
 function MFWorkspace(
@@ -119,6 +121,8 @@ function MFWorkspace(
         Vector{MF}(undef, 0),
         factor_capacity,
         ldlt_block_capacity,
+        (0, 0),
+        0,
     )
 end
 
@@ -134,10 +138,13 @@ function workspace_capacity(workspace::MFWorkspace)
         gemm_capacity = isempty(workspace.gemm.buffers) ? 0 :
                         minimum(length, workspace.gemm.buffers)
         return (
-            factor=workspace.factor_capacity,
-            ldlt_block=workspace.ldlt_block_capacity,
+            factor_capacity=workspace.factor_capacity,
+            ldlt_block_capacity=workspace.ldlt_block_capacity,
             gemm_workers=length(workspace.gemm.buffers),
-            gemm_elements_per_worker=gemm_capacity,
+            gemm_capacity=gemm_capacity,
+            qr_ftranspose_rows=workspace.qr_ftranspose_capacity[1],
+            qr_ftranspose_cols=workspace.qr_ftranspose_capacity[2],
+            qr_aux=workspace.qr_aux_capacity,
         )
     finally
         unlock(workspace.gemm.lock)
@@ -147,12 +154,16 @@ end
 """
     ensure_workspace_capacity!(workspace; factor_capacity=0,
                                ldlt_block_capacity=0,
-                               gemm_workers=1, gemm_capacity=0)
+                               gemm_workers=1, gemm_capacity=0,
+                               qr_ftranspose_rows=0, qr_ftranspose_cols=0,
+                               qr_aux=0)
 
 Grow selected workspace capacities without shrinking existing storage. Live
 factors own their required metadata and remain valid after every growth path.
 Capacity growth must not overlap factorization using the same `MFWorkspace`;
 growth of the packed GEMM subworkspace is internally serialized with its users.
+`qr_ftranspose_rows/cols` and `qr_aux` reserve the blocked-RRQR panel scratch so
+the first blocked `rrqr!` does not grow it on the hot path.
 """
 function ensure_workspace_capacity!(
     workspace::MFWorkspace{MF};
@@ -160,8 +171,12 @@ function ensure_workspace_capacity!(
     ldlt_block_capacity::Int=0,
     gemm_workers::Int=1,
     gemm_capacity::Int=0,
+    qr_ftranspose_rows::Int=0,
+    qr_ftranspose_cols::Int=0,
+    qr_aux::Int=0,
 ) where {MF<:MultiFloat}
-    minimum((factor_capacity, ldlt_block_capacity, gemm_capacity)) >= 0 ||
+    minimum((factor_capacity, ldlt_block_capacity, gemm_capacity,
+             qr_ftranspose_rows, qr_ftranspose_cols, qr_aux)) >= 0 ||
         throw(ArgumentError("workspace capacities must be nonnegative"))
     gemm_workers >= 1 || throw(ArgumentError("gemm_workers must be positive"))
 
@@ -187,6 +202,22 @@ function ensure_workspace_capacity!(
             Matrix{MF}(undef, new_factor_capacity, weighted_columns)
         workspace.ldlt_block_capacity = new_block_capacity
     end
+    # Reserve the blocked-RRQR panel scratch so the first blocked rrqr! does not
+    # grow it on the hot path.
+    if qr_ftranspose_rows > size(workspace.qr_ftranspose, 1) ||
+       qr_ftranspose_cols > size(workspace.qr_ftranspose, 2)
+        workspace.qr_ftranspose = Matrix{MF}(
+            undef,
+            max(size(workspace.qr_ftranspose, 1), qr_ftranspose_rows),
+            max(size(workspace.qr_ftranspose, 2), qr_ftranspose_cols),
+        )
+    end
+    if qr_aux > length(workspace.qr_aux)
+        resize!(workspace.qr_aux, qr_aux)
+    end
+    workspace.qr_ftranspose_capacity =
+        (size(workspace.qr_ftranspose, 1), size(workspace.qr_ftranspose, 2))
+    workspace.qr_aux_capacity = length(workspace.qr_aux)
     _prepare_gemm_workspace!(workspace.gemm, gemm_workers, gemm_capacity)
     return workspace
 end

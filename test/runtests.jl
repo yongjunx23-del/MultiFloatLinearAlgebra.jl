@@ -2166,10 +2166,13 @@ include("qr_delayed_norm.jl")
                 )
                 initial_capacity = workspace_capacity(workspace)
                 @test initial_capacity == (
-                    factor=n,
-                    ldlt_block=4,
+                    factor_capacity=n,
+                    ldlt_block_capacity=4,
                     gemm_workers=2,
-                    gemm_elements_per_worker=n * 6,
+                    gemm_capacity=n * 6,
+                    qr_ftranspose_rows=0,
+                    qr_ftranspose_cols=0,
+                    qr_aux=0,
                 )
 
                 @test_throws ArgumentError MFWorkspace(T; factor_capacity=-1)
@@ -2393,7 +2396,7 @@ include("qr_delayed_norm.jl")
                 @test factor_diagnostics(live_qr).success
                 @test solve(live_lu, lu_rhs; config=lu_config) ==
                     solve(lu_owned, lu_rhs; config=lu_config)
-                @test workspace_capacity(workspace).factor == n + 5
+                @test workspace_capacity(workspace).factor_capacity == n + 5
 
                 nonfinite = fill(T(NaN), 4, 4)
                 failed = MultiFloatLinearAlgebra.lu!(
@@ -2469,6 +2472,8 @@ include("qr_delayed_norm.jl")
                 :concurrent_factor_workspace, :syrk_authoritative_triangle,
                 :syrk_inactive_triangle, :factor_cache_kinds,
                 :factor_cache_ownership,
+                :factor_cache_warm_vector_solve_zero_alloc,
+                :factor_cache_warm_matrix_solve_zero_alloc,
             )),
             expected_properties,
         )
@@ -2503,6 +2508,10 @@ include("qr_delayed_norm.jl")
             @test !first_query.concurrent_factor_workspace
             @test first_query.syrk_authoritative_triangle === :lower
             @test first_query.syrk_inactive_triangle === :preserved
+            # The warm-path zero-allocation facts are gated to the multi-limb
+            # types the allocation gate verifies (x2/x3/x4); x1 is not claimed.
+            @test first_query.factor_cache_warm_vector_solve_zero_alloc == (limbs >= 2)
+            @test first_query.factor_cache_warm_matrix_solve_zero_alloc == (limbs >= 2)
             for property in operation_properties
                 property === :mixed_precision_residual && continue
                 @test getproperty(first_query, property)

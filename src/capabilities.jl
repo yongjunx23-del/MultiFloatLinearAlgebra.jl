@@ -15,6 +15,10 @@ function capabilities(
     ::Type{MF},
 ) where {N,MF<:MultiFloat{Float64,N}}
     supported = 1 <= N <= 4
+    # The allocation gate (benchmark/allocation_gate.jl) verifies the warm-path
+    # zero-allocation facts for x2/x3/x4 only; it does not test x1, so the
+    # claims are gated to the multi-limb types (N >= 2).
+    zero_alloc_gated = supported && N >= 2
     mixed_residual_targets = (
         x2=false,
         x3=supported && N == 2,
@@ -66,11 +70,10 @@ function capabilities(
             cholesky=supported, lu=supported, ldlt=supported, rrqr=supported,
         ),
         factor_cache_ownership=:cache_owned,
-        # Warm-path zero-allocation facts. The allocation gate
-        # (benchmark/allocation_gate.jl) verifies these for x2/x3/x4; it does
-        # not test x1, so the claims are gated for the multi-limb types.
-        factor_cache_warm_vector_solve_zero_alloc=supported,
-        factor_cache_warm_matrix_solve_zero_alloc=supported,
+        # Warm-path zero-allocation facts, gated to the multi-limb types the
+        # allocation gate actually verifies (x2/x3/x4); x1 is not claimed.
+        factor_cache_warm_vector_solve_zero_alloc=zero_alloc_gated,
+        factor_cache_warm_matrix_solve_zero_alloc=zero_alloc_gated,
         factor_metadata_ownership=:factor_owned,
         factor_matrix_ownership=:borrowed_input,
         factorization_destructive=true,

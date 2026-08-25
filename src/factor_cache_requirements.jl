@@ -23,9 +23,12 @@ with `config` on scalar type `MF`, so the warm path does not allocate. `shape`
 is a `NamedTuple` with the operation's dimensions (e.g. `(n=)` for a
 factorization, `(m=,k=,n=)` for GEMM, `(m=,n=)` for RRQR).
 
-Returns `(factor=, ldlt_block=, gemm_workers=, gemm_capacity=)`, matching
-`ensure_workspace_capacity!`. GEMM capacities are derived from `gemm_plan`
-(actual packed elements per worker) rather than a guessed panel width.
+Returns `(factor_capacity=, ldlt_block_capacity=, gemm_workers=,
+gemm_capacity=, qr_ftranspose_rows=, qr_ftranspose_cols=, qr_aux=)`, matching
+`ensure_workspace_capacity!` so `ensure_workspace_capacity!(ws; req...)` works.
+GEMM capacities are derived from `gemm_plan` (actual packed elements per
+worker) rather than a guessed panel width; `qr_ftranspose_rows/cols` and
+`qr_aux` reserve the blocked-RRQR panel scratch.
 
 Supported `operation` symbols: `:gemm`, `:syrk`, `:gemmt`, `:lu`, `:ldlt`,
 `:rrqr`, `:cholesky`, `:solve`. Unsupported operations throw.
@@ -51,32 +54,52 @@ function workspace_requirements(
 ) where {MF<:MultiFloat}
     if operation === :cholesky || operation === :lu
         n = _require_nonnegative(_require_shape(shape, :n), :n)
-        return (factor=n, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
+        if operation === :lu
+            # The trailing update is C(n-block, n-block) = A(n-block, block) *
+            # B(block, n-block); reserve the packed GEMM capacity it needs.
+            block = max(config.lu_block, 1)
+            plan = gemm_plan(MF, n - block, block, n - block, config)
+            return (factor_capacity=n, ldlt_block_capacity=0,
+                    gemm_workers=plan.workers,
+                    gemm_capacity=plan.packed_elements_per_worker,
+                    qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
+        end
+        return (factor_capacity=n, ldlt_block_capacity=0, gemm_workers=1, gemm_capacity=0,
+                qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
     elseif operation === :ldlt
         n = _require_nonnegative(_require_shape(shape, :n), :n)
-        return (factor=n, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
+        plan = ldlt_plan(MF, n, config)
+        block = plan.strategy === :blocked ? plan.block_size : 0
+        return (factor_capacity=n, ldlt_block_capacity=block, gemm_workers=1, gemm_capacity=0,
+                qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
     elseif operation === :rrqr
         m = _require_nonnegative(_require_shape(shape, :m), :m)
         n = _require_nonnegative(_require_shape(shape, :n), :n)
-        return (factor=max(m, n), ldlt_block=0, gemm_workers=0, gemm_capacity=0)
+        rc = min(m, n)
+        block = min(_QR_BLOCK_SIZE, rc)
+        return (factor_capacity=max(m, n), ldlt_block_capacity=0, gemm_workers=1, gemm_capacity=0,
+                qr_ftranspose_rows=block, qr_ftranspose_cols=n, qr_aux=block)
     elseif operation === :gemm
         m = _require_nonnegative(_require_shape(shape, :m), :m)
         k = _require_nonnegative(_require_shape(shape, :k), :k)
         n = _require_nonnegative(_require_shape(shape, :n), :n)
         plan = gemm_plan(MF, m, k, n, config)
-        return (factor=0, ldlt_block=0,
+        return (factor_capacity=0, ldlt_block_capacity=0,
                 gemm_workers=plan.workers,
-                gemm_capacity=plan.packed_elements_per_worker)
+                gemm_capacity=plan.packed_elements_per_worker,
+                qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
     elseif operation === :syrk || operation === :gemmt
         # SYRK/GEMMT lower output is n x n; the packed panel holds k x panel_cols.
         k = _require_nonnegative(_require_shape(shape, :k), :k)
         n = _require_nonnegative(_require_shape(shape, :n), :n)
         plan = gemm_plan(MF, n, k, n, config)
-        return (factor=0, ldlt_block=0,
+        return (factor_capacity=0, ldlt_block_capacity=0,
                 gemm_workers=plan.workers,
-                gemm_capacity=plan.packed_elements_per_worker)
+                gemm_capacity=plan.packed_elements_per_worker,
+                qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
     elseif operation === :solve
-        return (factor=0, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
+        return (factor_capacity=0, ldlt_block_capacity=0, gemm_workers=1, gemm_capacity=0,
+                qr_ftranspose_rows=0, qr_ftranspose_cols=0, qr_aux=0)
     end
     throw(ArgumentError("unsupported workspace_requirements operation: $operation"))
 end
