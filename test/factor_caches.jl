@@ -389,6 +389,9 @@ end
     # reconfigure! invalidates and, with prepare!, makes the new config the frozen one
     reconfigure!(c, cfg2)
     @test !issuccess(c)
+    @test factor_state(c) == :reconfigure_requires_prepare
+    # reconfigure! without prepare! must make factorize! refuse (fail-closed)
+    @test_throws ArgumentError factorize!(c, A)
     prepare!(c, n)
     factorize!(c, A)
     @test issuccess(c)
@@ -399,6 +402,16 @@ end
     prepare!(cc, n)
     factorize!(cc, spd)
     @test_throws ArgumentError factorize!(cc, spd; config=cfg2)
+    # shape change requires explicit prepare: mutating the live factor storage
+    # must not let factorize! run at a new size without prepare!
+    c3 = MFLUCache(T; config=cfg)
+    prepare!(c3, n)
+    factorize!(c3, A)
+    c3.factors = Matrix{T}(undef, n + 4, n + 4)
+    @test_throws ArgumentError factorize!(c3, cache_diagdom(T, n + 4))
+    prepare!(c3, n + 4)
+    factorize!(c3, cache_diagdom(T, n + 4))
+    @test issuccess(c3)
 end
 
 @testset "rectangular RRQR cache route" begin
