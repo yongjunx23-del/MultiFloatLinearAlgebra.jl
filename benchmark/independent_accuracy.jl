@@ -387,9 +387,8 @@ function check_rrqr(::Type{T}, n) where {T}
     e1 = _rel_err_vector(x, xbig)
     check("$tag vector solve rel err", e1 <= tol_rel(T), @sprintf("%.3e", e1))
 
-    # multi-RHS matrix solve (guarded: RRQR cache matrix solve applies the
-    # column permutation as if the destination were a flat vector, corrupting
-    # multi-column solutions; see report)
+    # multi-RHS matrix solve (validated: the matrix-destination permutation
+    # iterates columns, so multi-column solutions are correct)
     Xok, X = _safe_matrix_solve(cache, T, Bbig, n, 3)
     if Xok
         em = _rel_err_matrix(X, Xbig)
@@ -410,6 +409,70 @@ function check_rrqr(::Type{T}, n) where {T}
     b = max(_backward_error(Abig, BigFloat.(x), bbig),
             _backward_error(Abig, BigFloat.(X), Bbig))
     check("$tag backward error", b <= tol_back(T), @sprintf("%.3e", b))
+end
+
+# Rectangular RRQR cache route validated against the 512-bit BigFloat reference:
+# tall least-squares, wide reconstruction, and solve_r! trans=:T for vector and
+# matrix RHS. This closes the coverage gap that previously hid the trans=:T bug.
+function check_rrqr_rectangular(::Type{T}, m, n) where {T}
+    tag = "x$(limb(T))-rrqr-rect"
+    Abig = Matrix{BF}(undef, m, n)
+    for j in 1:n, i in 1:m
+        Abig[i, j] = BF(sin(0.1 * i + 0.2 * j) + 0.3 * cos(0.05 * i * j))
+    end
+    for j in 1:min(m, n)
+        Abig[j, j] += BF(4)   # diagonal dominance -> full column rank
+    end
+    A = T.(Abig)
+    cache = MFRRQRCache(T)
+    prepare!(cache, m, n)
+    factorize!(cache, A)
+    check("$tag factorize success", MFLA.issuccess(cache))
+
+    p = factor_permutation(cache)
+    # tall least-squares: x = R^-1 Q' b permuted (only meaningful when m >= n)
+    if m >= n
+        xbig = Matrix{BF}(undef, n, 1)
+        for i in 1:n
+            xbig[i, 1] = BF(sin(0.3 * i))
+        end
+        bbig = Abig * xbig
+        b = T.(bbig[:, 1])
+        y = copy(b)
+        apply_q!(y, cache; trans=:T)
+        ylead = y[1:n]
+        solve_r!(ylead, cache, n; trans=:N)
+        x = zeros(T, n)
+        for i in 1:n
+            x[p[i]] = ylead[i]
+        end
+        e = _rel_err_vector(x, xbig[:, 1])
+        check("$tag tall least-squares rel err", e <= tol_rel(T), @sprintf("%.3e", e))
+    end
+
+    # wide reconstruction A[:,p] ≈ Q*R
+    Q, R = rrqr_reconstruction(factor_matrix(cache), cache.tau, cache.permutation)
+    r = _rel_recon(Q * R, Abig[:, p])
+    check("$tag wide reconstruction A[:,p]≈Q*R", r <= tol_rel(T), @sprintf("%.3e", r))
+
+    # solve_r! trans=:T for vector and matrix RHS (leading rank = min(m,n))
+    rank = min(m, n)
+    Rlead = zeros(T, rank, rank)
+    for c in 1:rank, r in 1:c
+        Rlead[r, c] = factor_matrix(cache)[r, c]
+    end
+    xref = T.(randn(rank))
+    bT = transpose(Rlead) * xref
+    xT = copy(bT)
+    solve_r!(xT, cache, rank; trans=:T)
+    eT = _rel_err_vector(xT, xref)
+    check("$tag solve_r! trans=:T rel err", eT <= tol_rel(T), @sprintf("%.3e", eT))
+    Xref = T.(randn(rank, 3))
+    BT = transpose(Rlead) * Xref
+    XT = copy(BT)
+    solve_r!(XT, cache, rank; trans=:T)
+    eTm = _rel_err_matrix(XT, Xref)
+    check("$tag solve_r! mat trans=:T rel err", eTm <= tol_rel(T), @sprintf("%.3e", eTm))
 end
 
 # ---------------------------------------------------------------------------
@@ -614,6 +677,8 @@ function main()
         check_lu(T, n_well)
         check_ldlt(T, n_well)
         check_rrqr(T, n_well)
+        check_rrqr_rectangular(T, 40, 24)   # tall
+        check_rrqr_rectangular(T, 16, 32)   # wide
     end
 
     for T in TYPES
