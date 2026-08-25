@@ -118,7 +118,6 @@ function MFLUCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<:M
         Int[],
         _FACTOR_CACHE_INVALID,
         zero(MF),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         config,
         zero(UInt), zero(UInt), (0, 0),
     )
@@ -129,7 +128,6 @@ function prepare!(cache::MFLUCache{MF}, n::Integer; nrhs::Integer=1) where {MF<:
     nrhs >= 1 || throw(ArgumentError("nrhs must be positive"))
     size(cache.factors, 1) == n || (cache.factors = Matrix{MF}(undef, n, n))
     length(cache.ipiv) == n || (cache.ipiv = Vector{Int}(undef, n))
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
     cache.prepared_shape = (n, n)
     cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
@@ -212,7 +210,6 @@ function MFLDLTCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Matrix{MF}(undef, 0, 0),
         _FACTOR_CACHE_INVALID,
         zero(MF),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         config,
         zero(UInt), zero(UInt), (0, 0),
     )
@@ -232,7 +229,6 @@ function prepare!(cache::MFLDLTCache{MF}, n::Integer; nrhs::Integer=1) where {MF
     if block_capacity > 0 && (size(cache.weighted, 1) != n || size(cache.weighted, 2) < block_capacity + 1)
         cache.weighted = Matrix{MF}(undef, n, block_capacity + 1)
     end
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
     cache.prepared_shape = (n, n)
     cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
@@ -432,7 +428,6 @@ function MFRRQRCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Vector{Bool}(undef, 0),
         Matrix{MF}(undef, 0, 0),
         Vector{MF}(undef, 0),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         _FACTOR_CACHE_INVALID,
         config,
         zero(UInt), zero(UInt), (0, 0),
@@ -461,12 +456,14 @@ function prepare!(
     length(cache.norm_sum) == n || (cache.norm_sum = Vector{MF}(undef, n))
     length(cache.norm_dirty) == n || (cache.norm_dirty = Vector{Bool}(undef, n))
     block_size = min(_QR_BLOCK_SIZE, reflector_count)
-    if size(cache.ftranspose, 1) < block_size || size(cache.ftranspose, 2) < n
-        cache.ftranspose = Matrix{MF}(undef, max(block_size, 1), n)
+    # Always reserve at least one row so the zero-reflector (m=0 or n=0) case
+    # matches factor_cache_requirements exactly; the buffer is unused there.
+    alloc_rows = max(block_size, 1)
+    if size(cache.ftranspose, 1) < alloc_rows || size(cache.ftranspose, 2) < n
+        cache.ftranspose = Matrix{MF}(undef, alloc_rows, n)
     end
-    length(cache.auxiliary) < block_size &&
-        (cache.auxiliary = Vector{MF}(undef, max(block_size, 1)))
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
+    length(cache.auxiliary) < alloc_rows &&
+        (cache.auxiliary = Vector{MF}(undef, alloc_rows))
     cache.prepared_shape = (m, n)
     cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID

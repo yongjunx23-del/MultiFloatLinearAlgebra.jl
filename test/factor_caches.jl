@@ -353,7 +353,7 @@ end
     w0 = workspace_requirements(T, :lu, (n=64,), cfg)
     w1 = workspace_requirements(T, :lu, (n=64,), cfg)
     @test w0 == w1
-    @test w0.factorization == 64
+    @test w0.factor == 64
     wg = workspace_requirements(T, :gemm, (m=64, k=64, n=64), cfg)
     plan = gemm_plan(T, 64, 64, 64, cfg)
     @test wg.gemm_workers == plan.workers
@@ -368,36 +368,54 @@ end
 
 @testset "factor cache requirements/capacity consistency" begin
     for T in (Float64x2, Float64x3, Float64x4), kind in (:cholesky, :lu, :ldlt, :rrqr)
-        n = 48
-        cfg = KernelConfig(thread_count=1)
-        shape = kind === :rrqr ? (m=n, n=n) : (n=n,)
-        req = factor_cache_requirements(T, kind, shape, cfg)
-        cache = if kind === :cholesky
-            MFCholeskyCache(T; config=cfg)
-        elseif kind === :lu
-            MFLUCache(T; config=cfg)
-        elseif kind === :ldlt
-            MFLDLTCache(T; config=cfg)
-        else
-            MFRRQRCache(T; config=cfg)
+        for cfg in (KernelConfig(thread_count=1), KernelConfig(thread_count=2))
+            shapes = kind === :rrqr ?
+                ((m=48, n=48), (m=8, n=48), (m=48, n=8), (m=0, n=48), (m=48, n=0), (m=0, n=0)) :
+                ((n=48,), (n=0,))
+            for shape in shapes
+                req = factor_cache_requirements(T, kind, shape, cfg)
+                cache = if kind === :cholesky
+                    MFCholeskyCache(T; config=cfg)
+                elseif kind === :lu
+                    MFLUCache(T; config=cfg)
+                elseif kind === :ldlt
+                    MFLDLTCache(T; config=cfg)
+                else
+                    MFRRQRCache(T; config=cfg)
+                end
+                if kind === :rrqr
+                    prepare!(cache, shape.m, shape.n)
+                else
+                    prepare!(cache, shape.n)
+                end
+                cap = factor_cache_capacity(cache)
+                @test cap.matrix == req.matrix
+                @test cap.factor_matrix_elements == req.factor_matrix_elements
+                @test cap.pivots == req.pivots
+                @test cap.blocks == req.blocks
+                @test cap.dsub == req.dsub
+                @test cap.weighted_panel == req.weighted_panel
+                @test cap.tau == req.tau
+                @test cap.permutation == req.permutation
+                @test cap.cycle_leaders_capacity == req.cycle_leaders_capacity
+                @test cap.norm_scale == req.norm_scale
+                @test cap.norm_sum == req.norm_sum
+                @test cap.norm_dirty == req.norm_dirty
+                @test cap.ftranspose == req.ftranspose
+                @test cap.auxiliary == req.auxiliary
+                @test cap.gemm_workers == req.gemm_workers
+                @test cap.gemm_packed_elements_per_worker == req.gemm_packed_elements_per_worker
+            end
         end
-        prepare!(cache, n)
-        cap = factor_cache_capacity(cache)
-        @test cap.matrix == req.matrix
-        @test cap.factor_matrix_elements == req.factor_matrix_elements
-        @test cap.pivots == req.pivots
-        @test cap.blocks == req.blocks
-        @test cap.dsub == req.dsub
-        @test cap.weighted_panel == req.weighted_panel
-        @test cap.tau == req.tau
-        @test cap.permutation == req.permutation
-        @test cap.cycle_leaders_capacity == req.cycle_leaders_capacity
-        @test cap.norm_scale == req.norm_scale
-        @test cap.norm_sum == req.norm_sum
-        @test cap.norm_dirty == req.norm_dirty
-        @test cap.ftranspose == req.ftranspose
-        @test cap.auxiliary == req.auxiliary
     end
+    # negative dimensions and overflow are rejected by the pure query
+    T = Float64x2
+    cfg = KernelConfig(thread_count=1)
+    @test_throws ArgumentError factor_cache_requirements(T, :rrqr, (m=-1, n=5), cfg)
+    @test_throws ArgumentError workspace_requirements(T, :lu, (n=-3,), cfg)
+    @test_throws Exception factor_cache_requirements(
+        T, :rrqr, (m=typemax(Int) ÷ 2, n=typemax(Int) ÷ 2), cfg,
+    )
 end
 
 # The required fail-closed regression: successful factorize -> failing

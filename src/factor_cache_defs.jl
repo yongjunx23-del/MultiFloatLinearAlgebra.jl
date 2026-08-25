@@ -51,7 +51,6 @@ mutable struct MFLUCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     ipiv::Vector{Int}
     status::Int
     original_maximum::MF
-    gemm::GemmWorkspace{MF}
     config::KernelConfig
     config_epoch::UInt
     prepared_epoch::UInt
@@ -74,7 +73,6 @@ mutable struct MFLDLTCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     weighted::Matrix{MF}
     status::Int
     original_maximum::MF
-    gemm::GemmWorkspace{MF}
     config::KernelConfig
     config_epoch::UInt
     prepared_epoch::UInt
@@ -100,7 +98,6 @@ mutable struct MFRRQRCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     norm_dirty::Vector{Bool}
     ftranspose::Matrix{MF}
     auxiliary::Vector{MF}
-    gemm::GemmWorkspace{MF}
     status::Int
     config::KernelConfig
     config_epoch::UInt
