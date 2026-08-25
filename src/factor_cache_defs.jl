@@ -141,6 +141,17 @@ function invalidate!(cache::AbstractMFFactorCache)
     return cache
 end
 
+"""
+    refresh!(cache::AbstractMFFactorCache)
+
+Mark a factor cache as not holding a usable factorization, so the next
+`factorize!` re-factorizes. This is the explicit refresh signal after a caller
+mutates the source matrix in place. Equivalent to [`invalidate!`](@ref); the
+name is provided for callers that think of it as "re-factorize on next use".
+The LinearSolve extension adds a `refresh!` method for its `LinearCache`.
+"""
+refresh!(cache::AbstractMFFactorCache) = invalidate!(cache)
+
 # The frozen-config contract: a cache's configuration is fixed at setup and
 # must be changed only through `reconfigure!` + `prepare!`. The hot path
 # (`factorize!`/`solve!`) rejects any config that differs from the frozen one.

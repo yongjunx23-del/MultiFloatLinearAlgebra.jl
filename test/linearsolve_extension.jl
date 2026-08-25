@@ -94,6 +94,7 @@ import SciMLBase
                 matrix_cache = LinearSolve.init(problem_matrix, algorithm)
                 matrix_solution = SciMLBase.solve!(matrix_cache)
                 @test matrix_solution.retcode == SciMLBase.ReturnCode.Success
+                @test size(matrix_solution.u) == size(B)
                 @test max_relative_error(matrix_solution.u, expected_matrix) <= tolerance(T, 16)
                 @test !matrix_cache.isfresh
                 matrix_storage = factor_matrix(matrix_cache.cacheval)
@@ -122,7 +123,7 @@ import SciMLBase
                 inplace_first = SciMLBase.solve!(inplace_cache)
                 @test inplace_first.retcode == SciMLBase.ReturnCode.Success
                 inplace_cache.A[1, 1] += one(T)
-                extension.refresh!(inplace_cache)
+                refresh!(inplace_cache)
                 @test inplace_cache.isfresh
                 inplace_cache.b = inplace_cache.A * expected
                 inplace_refreshed = SciMLBase.solve!(inplace_cache)
