@@ -258,6 +258,94 @@ end
     end
 end
 
+@testset "factor cache diagnostics states" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            n = 8
+            spd = cache_spd(T, n)
+            diagdom = cache_diagdom(T, n)
+            ind = cache_indefinite(T, n)
+
+            # fresh (unprepared) cache: numeric fields are nothing
+            for cache in (
+                MFCholeskyCache(T; config=cfg),
+                MFLUCache(T; config=cfg),
+                MFLDLTCache(T; config=cfg),
+                MFRRQRCache(T; config=cfg),
+            )
+                d = factor_diagnostics(cache)
+                @test d.success == false
+                @test d.state in (:invalidated, :reconfigure_requires_prepare)
+                @test d.finite === nothing
+            end
+
+            # prepared cache: numeric fields are nothing
+            c = MFCholeskyCache(T; config=cfg); prepare!(c, n)
+            d = factor_diagnostics(c)
+            @test d.success == false
+            @test d.minimum_diagonal === nothing
+            @test d.finite === nothing
+            l = MFLUCache(T; config=cfg); prepare!(l, n)
+            dl = factor_diagnostics(l)
+            @test dl.pivots === nothing
+            @test dl.maximum_u === nothing
+            q = MFRRQRCache(T; config=cfg); prepare!(q, n)
+            dq = factor_diagnostics(q)
+            @test dq.rdiag === nothing
+            @test dq.permutation === nothing
+            @test_throws ArgumentError factor_permutation(q)
+            @test_throws ArgumentError factor_rdiag(q)
+
+            # success diagnostics are full
+            factorize!(c, spd)
+            ds = factor_diagnostics(c)
+            @test ds.success == true
+            @test ds.minimum_diagonal isa T
+            factorize!(l, diagdom)
+            dls = factor_diagnostics(l)
+            @test dls.success == true
+            @test dls.pivots isa Vector
+            factorize!(q, diagdom)
+            @test factor_permutation(q) isa Vector{Int}
+            @test factor_rdiag(q) isa Vector{T}
+
+            # invalidated after factorize: numeric fields are nothing (not stale)
+            invalidate!(c)
+            di = factor_diagnostics(c)
+            @test di.state == :invalidated
+            @test di.minimum_diagonal === nothing
+            @test di.finite === nothing
+            invalidate!(q)
+            @test_throws ArgumentError factor_permutation(q)
+            @test_throws ArgumentError factor_rdiag(q)
+
+            # nonfinite failure: LU maximum_u/pivot_growth are nothing
+            lnf = MFLUCache(T; config=cfg); prepare!(lnf, 2)
+            factorize!(lnf, T[1 NaN; 0 1]; check=false)
+            dnf = factor_diagnostics(lnf)
+            @test dnf.state == :nonfinite_input
+            @test dnf.maximum_u === nothing
+            @test dnf.pivot_growth === nothing
+            @test dnf.original_maximum === nothing
+
+            # singular failure: meaningful fields, not nothing
+            ls = MFLUCache(T; config=cfg); prepare!(ls, 2)
+            factorize!(ls, T[1 2; 2 4]; check=false)
+            dsing = factor_diagnostics(ls)
+            @test dsing.state == :singular
+            @test dsing.failure_location isa Int
+            @test dsing.pivots isa Vector
+
+            # failure -> recovery diagnostics
+            factorize!(ls, T[4 1; 1 3]; check=false)
+            drec = factor_diagnostics(ls)
+            @test drec.success == true
+            @test drec.state == :success
+        end
+    end
+end
+
 @testset "factor cache pure requirements queries" begin
     T = Float64x2
     cfg = KernelConfig(thread_count=1)

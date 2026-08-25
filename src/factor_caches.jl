@@ -806,16 +806,21 @@ end
     factor_permutation(cache::MFRRQRCache) -> Vector{Int}
 
 Return a caller-owned copy of the column permutation `p` satisfying
-`A_original[:, p] = Q * R`.
+`A_original[:, p] = Q * R`. Requires a successful QR cache.
 """
-factor_permutation(cache::MFRRQRCache) = copy(cache.permutation)
+function factor_permutation(cache::MFRRQRCache)
+    issuccess(cache) || throw(ArgumentError("factor_permutation requires a successful QR cache"))
+    return copy(cache.permutation)
+end
 
 """
     factor_rdiag(cache::MFRRQRCache) -> Vector{MF}
 
 Return a copy of the signed diagonal of the compactly stored `R` factor.
+Requires a successful QR cache.
 """
 function factor_rdiag(cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
+    issuccess(cache) || throw(ArgumentError("factor_rdiag requires a successful QR cache"))
     diagonal_count = min(size(cache.factors)...)
     diagonal = Vector{MF}(undef, diagonal_count)
     @inbounds for index in 1:diagonal_count
