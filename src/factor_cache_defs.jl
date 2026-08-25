@@ -35,6 +35,9 @@ mutable struct MFCholeskyCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     factors::Matrix{MF}
     status::Int
     config::KernelConfig
+    config_epoch::UInt
+    prepared_epoch::UInt
+    prepared_shape::Tuple{Int,Int}
 end
 
 """
@@ -48,8 +51,10 @@ mutable struct MFLUCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     ipiv::Vector{Int}
     status::Int
     original_maximum::MF
-    gemm::GemmWorkspace{MF}
     config::KernelConfig
+    config_epoch::UInt
+    prepared_epoch::UInt
+    prepared_shape::Tuple{Int,Int}
 end
 
 """
@@ -68,8 +73,10 @@ mutable struct MFLDLTCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     weighted::Matrix{MF}
     status::Int
     original_maximum::MF
-    gemm::GemmWorkspace{MF}
     config::KernelConfig
+    config_epoch::UInt
+    prepared_epoch::UInt
+    prepared_shape::Tuple{Int,Int}
 end
 
 """
@@ -91,15 +98,19 @@ mutable struct MFRRQRCache{MF<:MultiFloat} <: AbstractMFFactorCache{MF}
     norm_dirty::Vector{Bool}
     ftranspose::Matrix{MF}
     auxiliary::Vector{MF}
-    gemm::GemmWorkspace{MF}
     status::Int
     config::KernelConfig
+    config_epoch::UInt
+    prepared_epoch::UInt
+    prepared_shape::Tuple{Int,Int}
 end
 
 factor_precision(::AbstractMFFactorCache{MF}) where {MF} = MF
 factor_provider(::AbstractMFFactorCache) = :mfla
 
 function factor_state(cache::AbstractMFFactorCache)
+    cache.prepared_epoch == cache.config_epoch ||
+        return :reconfigure_requires_prepare
     status = factor_status(cache)
     status == _FACTOR_CACHE_INVALID && return :invalidated
     status == -1 && return :nonfinite_input
@@ -127,6 +138,17 @@ function invalidate!(cache::AbstractMFFactorCache)
     return cache
 end
 
+"""
+    refresh!(cache::AbstractMFFactorCache)
+
+Mark a factor cache as not holding a usable factorization, so the next
+`factorize!` re-factorizes. This is the explicit refresh signal after a caller
+mutates the source matrix in place. Equivalent to [`invalidate!`](@ref); the
+name is provided for callers that think of it as "re-factorize on next use".
+The LinearSolve extension adds a `refresh!` method for its `LinearCache`.
+"""
+refresh!(cache::AbstractMFFactorCache) = invalidate!(cache)
+
 # The frozen-config contract: a cache's configuration is fixed at setup and
 # must be changed only through `reconfigure!` + `prepare!`. The hot path
 # (`factorize!`/`solve!`) rejects any config that differs from the frozen one.
@@ -149,8 +171,29 @@ workspace. The hot path never accepts a config that differs from this one.
 """
 function reconfigure!(cache::AbstractMFFactorCache, new_config::KernelConfig)
     cache.config = new_config
+    cache.config_epoch += one(UInt)
     cache.status = _FACTOR_CACHE_INVALID
     return cache
+end
+
+# The frozen-config + explicit-prepare contract: a cache's configuration is fixed
+# at setup and must be changed only through `reconfigure!` + `prepare!`. The hot
+# path (`factorize!`) rejects any config that differs from the frozen one, and
+# rejects any call after a `reconfigure!` that has not been followed by an
+# explicit `prepare!` at the exact shape. `prepared_shape` is recorded at
+# `prepare!` time (not read from live storage), so it is immune to direct field
+# mutation of `factors`.
+@inline function _check_prepared(cache::AbstractMFFactorCache, shape::Tuple{Int,Int})
+    cache.prepared_epoch == cache.config_epoch ||
+        throw(ArgumentError(
+            "factor cache config changed; call reconfigure!(cache, new_config) then " *
+            "prepare!(cache, dims) before factorize!",
+        ))
+    cache.prepared_shape == shape ||
+        throw(ArgumentError(
+            "cache prepared for $(cache.prepared_shape); call prepare!(cache, dims) first",
+        ))
+    return nothing
 end
 
 factor_kind(::MFCholeskyCache) = :cholesky

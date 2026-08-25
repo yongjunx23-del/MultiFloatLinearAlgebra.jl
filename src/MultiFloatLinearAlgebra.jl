@@ -82,7 +82,7 @@ export residual!, residual_mixed!, normwise_backward_error, refinement_correctio
 export capabilities
 export MultiFloatLU, MultiFloatCholesky
 export AbstractMFFactorCache, MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache
-export prepare!, factorize!, solve!, invalidate!, reconfigure!
+export prepare!, factorize!, solve!, invalidate!, reconfigure!, refresh!
 export workspace_requirements, factor_cache_requirements, factor_cache_capacity
 
 end

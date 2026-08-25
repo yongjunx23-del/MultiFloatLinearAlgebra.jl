@@ -36,10 +36,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `MultiFloatCholesky`) now builds the cache at the matrix size in
   `init_cacheval` (reserving O(n²) storage only, no O(n³) factorization at
   init), so the first `solve!` does not grow storage; reuses the factor across
-  RHS updates, re-factorizes into existing storage on an `A` update, exposes a
-  public `refresh!` for in-place `A` mutation, and reports `ReturnCode.Failure`
-  on a failed factorization while keeping the cache fresh (never retaining a
-  prior success) so a replacement `A` can be retried.
+  RHS updates, re-factorizes into existing storage on an `A` update, and
+  `refresh!` is now a real exported public API — a core generic
+  `refresh!(cache::AbstractMFFactorCache)` (alias of `invalidate!`) exported
+  from the main module, plus a `refresh!(cache::LinearSolve.LinearCache)`
+  method in the extension for in-place `A` mutation — and reports
+  `ReturnCode.Failure` on a failed factorization while keeping the cache fresh
+  (never retaining a prior success) so a replacement `A` can be retried.
 
 ### Zero-allocation cache core
 

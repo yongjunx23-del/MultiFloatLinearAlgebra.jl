@@ -6,8 +6,8 @@ labeled (e.g. `unprepared`, `prepared/invalidated`, `factorized/success`) and
 each transition is labeled with the call that causes it.
 
 The cache-specific states map to the symbolic `factor_state` values the cache
-reports: `:invalidated`, `:nonfinite_input`, `:not_posdef`, `:singular`, and
-`:success`.
+reports: `:invalidated`, `:nonfinite_input`, `:not_posdef`, `:singular`,
+`:reconfigure_requires_prepare`, and `:success`.
 
 ## 1. Standalone factor API
 
@@ -75,12 +75,17 @@ successful.
    |  -------- refresh / reconfiguration / invalidation paths --------
    |
    |  invalidate!(cache)            (after caller mutates A in place)
-   |  reconfigure!(cache,new_cfg)   (then prepare! again: config change
-   |                                 may need larger workspace)
-   |  prepare!(cache, n)            (explicit resize at a new size)
+   |  reconfigure!(cache,new_cfg)   -> [ reconfigured ]  state = :reconfigure_requires_prepare
+   |  prepare!(cache, n)            (explicit resize at a new size; also the
+   |                                 required step after reconfigure!)
    |
    +--------> back to [ prepared!/invalidated ]
               (solve! now throws until factorize! runs again)
+
+   Reconfiguration is fail-closed: `reconfigure!` without a following
+   `prepare!` leaves the cache in `:reconfigure_requires_prepare`, in which
+   `factorize!` refuses (throws) until `prepare!` runs again. A shape change
+   likewise requires an explicit `prepare!` at the new size.
 
    Recovery after failure:
       [ factorized/failed ]  --factorize!(cache, A') (replacement A, same size)-->
@@ -96,18 +101,19 @@ successful.
 ## 3. LinearSolve adapter lifecycle
 
 `MultiFloatLU` / `MultiFloatCholesky` are the optional LinearSolve.jl weak-dep
-extension. `init` builds an **empty** cache (`init_cacheval`) to fix the
-`LinearCache.cacheval` field type **without** running the O(n³) factorization.
-Storage is grown on the first (or size-changing) factorization and reused
-afterward. A failed factorization returns `ReturnCode.Failure` while leaving
-`isfresh` true so the caller can replace `A` and retry.
+extension. `init` builds the cache at the matrix size in `init_cacheval` and
+calls `prepare!` — reserving O(n²) storage **without** running the O(n³)
+factorization, so the first `solve!` does not grow storage. A failed
+factorization returns `ReturnCode.Failure` while leaving `isfresh` true so the
+caller can replace `A` and retry.
 
 ```
             LinearProblem(A, b) ; alg = MultiFloatLU() / MultiFloatCholesky()
                      |
                      | LinearSolve.init / init_cacheval
                      v
-         [ initialized ]  LinearCache holds an EMPTY cache (no factorization)
+         [ initialized ]  LinearCache holds a cache built at the matrix size
+                          (prepare! done, NO factorization yet)
                      |
                      | first SciMLBase.solve!(cache, alg)
                      |   (cache.isfresh == true)

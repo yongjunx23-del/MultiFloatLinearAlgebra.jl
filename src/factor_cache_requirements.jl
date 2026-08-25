@@ -38,6 +38,11 @@ function workspace_requirements end
     return getproperty(shape, name)
 end
 
+@inline function _require_nonnegative(value::Int, name::Symbol)
+    value >= 0 || throw(ArgumentError("$name must be nonnegative"))
+    return value
+end
+
 function workspace_requirements(
     ::Type{MF},
     operation::Symbol,
@@ -45,33 +50,33 @@ function workspace_requirements(
     config::KernelConfig,
 ) where {MF<:MultiFloat}
     if operation === :cholesky || operation === :lu
-        n = _require_shape(shape, :n)
-        return (factorization=n, ldlt_block=0, gemm_workers=1, gemm_capacity=0)
+        n = _require_nonnegative(_require_shape(shape, :n), :n)
+        return (factor=n, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
     elseif operation === :ldlt
-        n = _require_shape(shape, :n)
-        return (factorization=n, ldlt_block=0, gemm_workers=1, gemm_capacity=0)
+        n = _require_nonnegative(_require_shape(shape, :n), :n)
+        return (factor=n, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
     elseif operation === :rrqr
-        m = _require_shape(shape, :m)
-        n = _require_shape(shape, :n)
-        return (factorization=max(m, n), ldlt_block=0, gemm_workers=1, gemm_capacity=0)
+        m = _require_nonnegative(_require_shape(shape, :m), :m)
+        n = _require_nonnegative(_require_shape(shape, :n), :n)
+        return (factor=max(m, n), ldlt_block=0, gemm_workers=0, gemm_capacity=0)
     elseif operation === :gemm
-        m = _require_shape(shape, :m)
-        k = _require_shape(shape, :k)
-        n = _require_shape(shape, :n)
+        m = _require_nonnegative(_require_shape(shape, :m), :m)
+        k = _require_nonnegative(_require_shape(shape, :k), :k)
+        n = _require_nonnegative(_require_shape(shape, :n), :n)
         plan = gemm_plan(MF, m, k, n, config)
-        return (factorization=0, ldlt_block=0,
+        return (factor=0, ldlt_block=0,
                 gemm_workers=plan.workers,
                 gemm_capacity=plan.packed_elements_per_worker)
     elseif operation === :syrk || operation === :gemmt
         # SYRK/GEMMT lower output is n x n; the packed panel holds k x panel_cols.
-        k = _require_shape(shape, :k)
-        n = _require_shape(shape, :n)
-        plan = gemm_plan(MF, k, k, n, config)
-        return (factorization=0, ldlt_block=0,
+        k = _require_nonnegative(_require_shape(shape, :k), :k)
+        n = _require_nonnegative(_require_shape(shape, :n), :n)
+        plan = gemm_plan(MF, n, k, n, config)
+        return (factor=0, ldlt_block=0,
                 gemm_workers=plan.workers,
                 gemm_capacity=plan.packed_elements_per_worker)
     elseif operation === :solve
-        return (factorization=0, ldlt_block=0, gemm_workers=1, gemm_capacity=0)
+        return (factor=0, ldlt_block=0, gemm_workers=0, gemm_capacity=0)
     end
     throw(ArgumentError("unsupported workspace_requirements operation: $operation"))
 end
@@ -109,6 +114,14 @@ function factor_cache_requirements end
     return (workers=plan.workers, packed=plan.packed_elements_per_worker)
 end
 
+# Checked element count so a pathological m*n cannot silently wrap to a negative
+# capacity in the pure requirements query.
+@inline function _checked_elements(m::Int, n::Int)
+    m >= 0 && n >= 0 || throw(ArgumentError("matrix dimensions must be nonnegative"))
+    elements = Base.checked_mul(m, n)
+    return elements
+end
+
 function factor_cache_requirements(
     ::Type{MF},
     kind::Symbol,
@@ -117,30 +130,30 @@ function factor_cache_requirements(
 ) where {MF<:MultiFloat}
     kind in (:cholesky, :lu, :ldlt, :rrqr) ||
         throw(ArgumentError("unsupported factor cache kind: $kind"))
-    n = _require_shape(shape, :n)
+    n = _require_nonnegative(_require_shape(shape, :n), :n)
     if kind === :rrqr
-        m = _require_shape(shape, :m)
+        m = _require_nonnegative(_require_shape(shape, :m), :m)
         rc = min(m, n)
-        # prepare! always allocates the blocked-panel scratch at min(16, rc) rows.
-        block = min(_QR_BLOCK_SIZE, rc)
-        gemm = _factor_cache_packed_requirements(MF, m, n, config)
+        # prepare! always allocates the blocked-panel scratch at max(min(16, rc), 1)
+        # rows (the max(...,1) keeps a well-defined 1-row buffer even at rc=0).
+        block = max(min(_QR_BLOCK_SIZE, rc), 1)
         return (
             kind=kind,
             matrix=(m=m, n=n),
-            factor_matrix_elements=m * n,
+            factor_matrix_elements=_checked_elements(m, n),
             pivots=0,                       # RRQR uses permutation, not pivots
             blocks=0,
             dsub=0,
             weighted_panel=(rows=0, cols=0),
             tau=rc,
             permutation=n,
-            cycle_leaders=rc,               # capacity = min(m, n)
-            cycle_leaders_capacity=rc,
+            cycle_leaders=n,                # capacity = n (matches prepare!)
+            cycle_leaders_capacity=n,
             norm_scale=n, norm_sum=n, norm_dirty=n,
             ftranspose=(rows=block, cols=n),
             auxiliary=block,
-            gemm_workers=gemm.workers,
-            gemm_packed_elements_per_worker=gemm.packed,
+            gemm_workers=0,
+            gemm_packed_elements_per_worker=0,
         )
     end
     if kind === :ldlt
@@ -148,54 +161,36 @@ function factor_cache_requirements(
         block_capacity = plan.strategy === :blocked ? plan.block_size : 0
         weighted_rows = block_capacity > 0 ? n : 0
         weighted_cols = block_capacity > 0 ? block_capacity + 1 : 0
-        gemm = _factor_cache_packed_requirements(MF, n, n, config)
         return (
             kind=kind,
             matrix=(m=n, n=n),
-            factor_matrix_elements=n * n,
+            factor_matrix_elements=_checked_elements(n, n),
             pivots=n, blocks=n, dsub=n,
             weighted_panel=(rows=weighted_rows, cols=weighted_cols),
             tau=0, permutation=0,
             cycle_leaders=0, cycle_leaders_capacity=0,
             norm_scale=0, norm_sum=0, norm_dirty=0,
             ftranspose=(rows=0, cols=0), auxiliary=0,
-            gemm_workers=gemm.workers,
-            gemm_packed_elements_per_worker=gemm.packed,
+            gemm_workers=0,
+            gemm_packed_elements_per_worker=0,
         )
     end
     # cholesky / lu: factor matrix + pivots (LU only)
     n_pivots = kind === :lu ? n : 0
-    gemm = _factor_cache_packed_requirements(MF, n, n, config)
     return (
         kind=kind,
         matrix=(m=n, n=n),
-        factor_matrix_elements=n * n,
+        factor_matrix_elements=_checked_elements(n, n),
         pivots=n_pivots, blocks=0, dsub=0,
         weighted_panel=(rows=0, cols=0),
         tau=0, permutation=0,
         cycle_leaders=0, cycle_leaders_capacity=0,
         norm_scale=0, norm_sum=0, norm_dirty=0,
         ftranspose=(rows=0, cols=0), auxiliary=0,
-        gemm_workers=gemm.workers,
-        gemm_packed_elements_per_worker=gemm.packed,
+        gemm_workers=0,
+        gemm_packed_elements_per_worker=0,
     )
 end
-
-# Packed-GEMM capacity used by a cache that owns a GemmWorkspace (LU/LDLT/RRQR).
-function _factor_cache_packed_requirements(::Type{MF}, m::Int, n::Int, config::KernelConfig) where {MF<:MultiFloat}
-    k = m                          # trailing-update reduction length
-    plan = gemm_plan(MF, m, k, n, config)
-    return (workers=plan.workers, packed=plan.packed_elements_per_worker)
-end
-
-# The cache owns a `GemmWorkspace`; report its actual capacity without needing
-# an `MFWorkspace` wrapper.
-@inline function _gemm_workspace_capacity(ws::GemmWorkspace{MF}) where {MF<:MultiFloat}
-    workers = length(ws.buffers)
-    capacity = workers == 0 ? 0 : minimum(length, ws.buffers)
-    return (gemm_workers=workers, gemm_elements_per_worker=capacity)
-end
-
 
 # 3. factor_cache_capacity(cache) — reflect the actual allocated storage.
 ############################################################################
@@ -224,7 +219,6 @@ function factor_cache_capacity(cache::MFCholeskyCache{MF}) where {MF<:MultiFloat
 end
 
 function factor_cache_capacity(cache::MFLUCache{MF}) where {MF<:MultiFloat}
-    gemm = _gemm_workspace_capacity(cache.gemm)
     return (
         kind=:lu,
         matrix=(m=size(cache.factors,1), n=size(cache.factors,2)),
@@ -235,13 +229,11 @@ function factor_cache_capacity(cache::MFLUCache{MF}) where {MF<:MultiFloat}
         cycle_leaders=0, cycle_leaders_capacity=0,
         norm_scale=0, norm_sum=0, norm_dirty=0,
         ftranspose=(rows=0, cols=0), auxiliary=0,
-        gemm_workers=gemm.gemm_workers,
-        gemm_packed_elements_per_worker=gemm.gemm_elements_per_worker,
+        gemm_workers=0, gemm_packed_elements_per_worker=0,
     )
 end
 
 function factor_cache_capacity(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
-    gemm = _gemm_workspace_capacity(cache.gemm)
     return (
         kind=:ldlt,
         matrix=(m=size(cache.factors,1), n=size(cache.factors,2)),
@@ -252,13 +244,11 @@ function factor_cache_capacity(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
         cycle_leaders=0, cycle_leaders_capacity=0,
         norm_scale=0, norm_sum=0, norm_dirty=0,
         ftranspose=(rows=0, cols=0), auxiliary=0,
-        gemm_workers=gemm.gemm_workers,
-        gemm_packed_elements_per_worker=gemm.gemm_elements_per_worker,
+        gemm_workers=0, gemm_packed_elements_per_worker=0,
     )
 end
 
 function factor_cache_capacity(cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
-    gemm = _gemm_workspace_capacity(cache.gemm)
     rc = min(size(cache.factors)...)
     return (
         kind=:rrqr,
@@ -272,7 +262,6 @@ function factor_cache_capacity(cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
         norm_scale=length(cache.norm_scale), norm_sum=length(cache.norm_sum),
         norm_dirty=length(cache.norm_dirty),
         ftranspose=(rows=size(cache.ftranspose,1), cols=size(cache.ftranspose,2)), auxiliary=length(cache.auxiliary),
-        gemm_workers=gemm.gemm_workers,
-        gemm_packed_elements_per_worker=gemm.gemm_elements_per_worker,
+        gemm_workers=0, gemm_packed_elements_per_worker=0,
     )
 end

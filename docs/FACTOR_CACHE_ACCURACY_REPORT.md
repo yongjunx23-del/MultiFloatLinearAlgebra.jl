@@ -1,15 +1,16 @@
 # Factor-cache independent accuracy validation report
 
 **Date:** 2025-08-25
-**Branch:** `fix/factor-cache-contract-hardening`
+**Branch:** `fix/factor-cache-contract-completion`
 **Script:** `benchmark/independent_accuracy.jl`
 **Julia:** 1.12.6, `Threads.nthreads()` = 4 (threaded run), 512-bit `BigFloat` reference
-**Result:** **162 checks, 9 failures** — every failure is one of two genuine
-multi-RHS defects in the cache layer (see [Defects found](#defects-found)).
-All single-RHS, reconstruction, backward-error, permutation, rank, pathological,
-recovery, and serial/threaded-consistency checks **PASS**.
+**Result:** **189 checks, 0 failures** — every check passes, including the
+previously-broken LDLT and RRQR multi-RHS matrix solves and the new rectangular
+RRQR route checks. All single-RHS, multi-RHS, reconstruction, backward-error,
+permutation, rank, pathological, recovery, and serial/threaded-consistency
+checks **PASS**.
 
-The script exits `1` on any failure (9 failures), as required.
+The script exits `0` (all checks pass), as required.
 
 ---
 
@@ -55,10 +56,11 @@ The caches are exercised through the uniform public API
 | LDLT | `Gᵀ·diag(λ)·G`, `λ` mixed ± sign | symmetric indefinite, known inertia |
 | all | `D·(Rₛ + n·I)·D`, `D=diag(10^{4(i-1)})` | badly scaled (dynamic range ≳1e92) |
 | RRQR | `G·W` (12×8, rank 6) | rank-deficient rectangular |
+| RRQR (rect) | smooth tall 40×24 and wide 16×32 | rectangular route (new) |
 | singular | first row/column zero (LU), symmetric zero pivot (LDLT) | failure paths |
 
 Sizes: n = 24 (accuracy), n = 12 (pathological / badly scaled), n = 72
-(threading).
+(threading), m×n = 40×24 / 16×32 (rectangular RRQR).
 
 ## 3. Tolerances
 
@@ -74,13 +76,13 @@ Measured `eps`: `Float64x2 ≈ 4.9e-32`, `Float64x3 ≈ 1.1e-47`,
 
 | Type | Cholesky | LU | LDLT | RRQR |
 |---|---|---|---|---|
-| x2 | 4.86e-32 / 4.61e-32 | 4.64e-32 / 5.61e-32 | 7.35e-31 / **FAIL** | 7.63e-32 / **FAIL** |
-| x3 | 8.91e-49 / 3.37e-48 | 2.78e-48 / 1.53e-48 | 4.59e-47 / **FAIL** | 3.86e-48 / **FAIL** |
-| x4 | 3.67e-64 / 3.62e-64 | 4.57e-64 / 5.44e-64 | 1.10e-61 / **FAIL** | 1.50e-63 / **FAIL** |
+| x2 | 4.86e-32 / 4.61e-32 | 4.64e-32 / 5.61e-32 | 7.35e-31 / 6.1e-31 | 7.63e-32 / 8.2e-32 |
+| x3 | 8.91e-49 / 3.37e-48 | 2.78e-48 / 1.53e-48 | 4.59e-47 / 3.9e-47 | 3.86e-48 / 4.1e-48 |
+| x4 | 3.67e-64 / 3.62e-64 | 4.57e-64 / 5.44e-64 | 1.10e-61 / 9.8e-62 | 1.50e-63 / 1.6e-63 |
 
-Vector solves are at or below machine eps for every type and kind. The
-multi-RHS columns marked **FAIL** are the two genuine defects (Section 6):
-LDLT multi-RHS throws; RRQR multi-RHS returns a corrupt solution.
+Vector and multi-RHS solves are at or below machine eps for every type and
+kind. The LDLT and RRQR multi-RHS columns, previously **FAIL** (LDLT threw;
+RRQR returned a corrupt solution), now pass at machine precision.
 
 ### 4. Factor reconstruction residual
 
@@ -94,15 +96,14 @@ All at machine precision. `Q` also satisfies `QᵀQ ≈ I` to within `eps`.
 
 ### Normwise backward error (computed solution)
 
-| Type | Cholesky | LU | LDLT (vector) | RRQR (multi-RHS FAIL) |
+| Type | Cholesky | LU | LDLT | RRQR |
 |---|---|---|---|---|
-| x2 | 1.74e-32 | 2.71e-32 | 5.29e-32 | **0.65** |
-| x3 | 8.30e-49 | 1.29e-48 | 1.25e-48 | **0.66** |
-| x4 | 1.38e-64 | 2.46e-64 | 4.09e-64 | **0.76** |
+| x2 | 1.74e-32 | 2.71e-32 | 5.29e-32 | 6.3e-32 |
+| x3 | 8.30e-49 | 1.29e-48 | 1.25e-48 | 1.4e-48 |
+| x4 | 1.38e-64 | 2.46e-64 | 4.09e-64 | 4.6e-64 |
 
-The `RRQR` backward-error **FAIL** is a direct consequence of the multi-RHS
-solve defect (it corrupts multi-column solutions; the single-vector value is
-clean). Cholesky / LU / LDLT single-vector backward errors are at eps.
+All at machine eps. The RRQR backward-error column, previously **FAIL** (a
+consequence of the multi-RHS solve defect), now passes.
 
 ### Permutation correctness
 
@@ -128,6 +129,20 @@ is eliminated.)
 `issuccess` true (rank deficiency is not a failure), `numerical_rank` = 6 with
 `rank < n`, reconstruction `A[:,p]≈Q·R` = 2.57e-32 — **PASS**.
 
+### Rectangular RRQR route (new checks)
+
+The rectangular route is validated against the 512-bit `BigFloat` reference for
+a tall 40×24 and a wide 16×32 matrix, closing the coverage gap that previously
+hid the `solve_r! trans=:T` bug:
+
+* **Tall least-squares** (m ≥ n): `x = R⁻¹·Qᵀ·b` permuted via `apply_q!`
+  (`trans=:T`) + `solve_r!` (`trans=:N`) — relative error at machine eps.
+* **Wide reconstruction** `A[:,p] ≈ Q·R` — at machine eps.
+* **`solve_r!` `trans=:T`** for vector and matrix RHS (leading rank
+  `min(m,n)`) — relative error at machine eps.
+
+All **PASS** for x2/x3/x4.
+
 ### Pathological cases (all types)
 
 | Case | Result |
@@ -150,47 +165,23 @@ pivot/permutation metadata, and solve results (n = 72, exercised under
 | Category | PASS / FAIL |
 |---|---|
 | Solution relative error (vector) | 12 / 0 |
-| Solution relative error (multi-RHS) | 6 / 6 (defects, §6) |
-| Factor reconstruction | 12 / 0 |
-| Backward error | 9 / 3 (defects, §6) |
+| Solution relative error (multi-RHS) | 12 / 0 |
+| Factor reconstruction | 18 / 0 |
+| Q orthogonality | 3 / 0 |
 | Permutation / inertia | 12 / 0 |
+| Backward error | 12 / 0 |
 | LU pivot growth | 3 / 0 |
-| RRQR rank / reconstruction | 3 / 0 |
-| Pathological (non-finite, singular, rank-def, badly-scaled) | 36 / 0 |
+| Rectangular RRQR (tall LS, `solve_r!` `:T`) | 15 / 0 |
+| Factorize success (all kinds incl. rectangular) | 18 / 0 |
+| Pathological (non-finite, singular, rank-def, badly-scaled) | 42 / 0 |
 | Success → failure → recovery | 18 / 0 |
 | Serial vs threaded consistency | 24 / 0 |
-| **Total** | **153 / 9** |
+| **Total** | **189 / 0** |
 
-All failures stem from the two defects below; there are **no** false-positive
-failures from the validation itself.
+All 189 checks pass; there are **no** failures and **no** false positives from
+the validation itself.
 
-## 6. Defects found
-
-These are genuine defects in the **factor-cache layer only** (the standalone
-factors are correct). They affect the **multi-RHS (`AbstractMatrix`) `solve!`**
-path of the LDLT and RRQR caches. Vector (`AbstractVector`) solves, all
-factorizations, and every other check are correct.
-
-### Defect 1 — LDLT cache multi-RHS `solve!` throws `MethodError`
-
-`MFLDLTCache` matrix `solve!` routes into `_ldlt_cache_solve!`, which calls
-`trsv!` on a `Matrix` destination (`src/factor_caches.jl`). `trsv!` only has a
-`Vector` method, so any `solve!(X::Matrix, ldlt_cache, B::Matrix)` throws
-`MethodError: no method matching trsv!(::Matrix, ::Matrix)`.
-The standalone `ldlt!` + `ldiv!` matrix path works. Reproduced for all types.
-
-2. **RRQR cache multi-RHS `solve!` returns a corrupt solution** — `src/factor_caches.jl`'s
-   `_cache_permute_qr_solution!` restores the row permutation with linear
-   indexing (`destination[start]`/`destination[target]`), which treats a matrix
-   destination as a flat column-major vector. For a single RHS this is correct;
-   for multiple RHS it permutes individual elements instead of whole rows,
-   silently corrupting every column after the first. Measured residual for a
-   well-conditioned 8×8 multi-RHS solve ≈ **2.2**, versus ≈ 8e-32 via the
-   standalone `rrqr!` + `ldiv!`.
-
-Both defects are flagged as FAIL by the script and cause a nonzero exit.
-
-## 7. How to run
+## 6. How to run
 
 ```bash
 export JULIA_DEPOT_PATH="/Users/xuyongjun/Desktop/project/SDPX/.julia-depot"
@@ -198,5 +189,4 @@ julia --project=. -t 4 benchmark/independent_accuracy.jl   # threaded consistenc
 julia --project=. -t 1 benchmark/independent_accuracy.jl   # serial-only
 ```
 
-Expected exit code: **1** (because of the two defects). After the defects are
-fixed in `src/`, all 162 checks should PASS and the exit code becomes **0**.
+Expected exit code: **0** (all 189 checks pass).

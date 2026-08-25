@@ -370,11 +370,10 @@ function _prepare_qr_block_scratch!(
 end
 
 # Extract the packed-GEMM subworkspace used by the blocked RRQR trailing
-# update. The RRQR cache carries its own `GemmWorkspace`; an `MFWorkspace`
-# routes through its embedded GEMM subworkspace.
+# update. An `MFWorkspace` routes through its embedded GEMM subworkspace; the
+# RRQR cache uses the view-free trailing update and carries no GEMM workspace.
 @inline _qr_gemm_workspace(workspace::Nothing) = nothing
 @inline _qr_gemm_workspace(workspace::MFWorkspace{MF}) where {MF} = workspace.gemm
-@inline _qr_gemm_workspace(workspace::MFRRQRCache{MF}) where {MF} = workspace.gemm
 
 # Resolve the `nothing` scratch argument shared by the `MFWorkspace` and
 # `MFRRQRCache` Union methods (avoids dispatch ambiguity).

@@ -16,11 +16,10 @@
 # SAMPLES times after a GC and the minimum is kept (robust to one-off compile /
 # GC spikes).
 #
-# Deliberately excluded: MFLDLTCache *matrix* solve — the `solve!` matrix route
-# for LDLT currently calls `trsv!` with a Matrix destination, which has no method
-# on this branch (see src/factor_caches.jl `_ldlt_cache_solve!`), so it throws.
-# Vector LDLT solve is gated; matrix solve is gated for the Cholesky, LU, and
-# RRQR caches where it works.
+# Every gated hot path is genuinely zero-allocation, including the LDLT matrix
+# solve and the RRQR rectangular apply_q!/solve_r! routes. The only nonzero rows
+# are the public gemm!/gemmt! GemmPlan allocations (framework cost, reported
+# separately).
 
 using LinearAlgebra
 using MultiFloats
@@ -59,9 +58,29 @@ const BASELINE = Dict{Tuple{Symbol,Int},Int}(
     (:lu_matrix_solve, 2) => 0,     (:lu_matrix_solve, 3) => 0,     (:lu_matrix_solve, 4) => 0,
     (:ldlt_factorize, 2) => 0,      (:ldlt_factorize, 3) => 0,      (:ldlt_factorize, 4) => 0,
     (:ldlt_vector_solve, 2) => 0,   (:ldlt_vector_solve, 3) => 0,   (:ldlt_vector_solve, 4) => 0,
+    (:ldlt_matrix_solve, 2) => 0,   (:ldlt_matrix_solve, 3) => 0,   (:ldlt_matrix_solve, 4) => 0,
     (:rrqr_factorize, 2) => 0,      (:rrqr_factorize, 3) => 0,      (:rrqr_factorize, 4) => 0,
     (:rrqr_vector_solve, 2) => 0,   (:rrqr_vector_solve, 3) => 0,   (:rrqr_vector_solve, 4) => 0,
     (:rrqr_matrix_solve, 2) => 0,   (:rrqr_matrix_solve, 3) => 0,   (:rrqr_matrix_solve, 4) => 0,
+    # RRQR rectangular apply_q! / solve_r! routes (:N and :T, vector and matrix)
+    (:rrqr_applyq_vec_N, 2) => 0,   (:rrqr_applyq_vec_N, 3) => 0,   (:rrqr_applyq_vec_N, 4) => 0,
+    (:rrqr_applyq_vec_T, 2) => 0,   (:rrqr_applyq_vec_T, 3) => 0,   (:rrqr_applyq_vec_T, 4) => 0,
+    (:rrqr_applyq_mat_N, 2) => 0,   (:rrqr_applyq_mat_N, 3) => 0,   (:rrqr_applyq_mat_N, 4) => 0,
+    (:rrqr_applyq_mat_T, 2) => 0,   (:rrqr_applyq_mat_T, 3) => 0,   (:rrqr_applyq_mat_T, 4) => 0,
+    (:rrqr_solver_vec_N, 2) => 0,   (:rrqr_solver_vec_N, 3) => 0,   (:rrqr_solver_vec_N, 4) => 0,
+    (:rrqr_solver_vec_T, 2) => 0,   (:rrqr_solver_vec_T, 3) => 0,   (:rrqr_solver_vec_T, 4) => 0,
+    (:rrqr_solver_mat_N, 2) => 0,   (:rrqr_solver_mat_N, 3) => 0,   (:rrqr_solver_mat_N, 4) => 0,
+    (:rrqr_solver_mat_T, 2) => 0,   (:rrqr_solver_mat_T, 3) => 0,   (:rrqr_solver_mat_T, 4) => 0,
+    # rectangular (tall) RRQR apply_q!/solve_r! route
+    (:rrqr_rect_applyq, 2) => 0,   (:rrqr_rect_applyq, 3) => 0,   (:rrqr_rect_applyq, 4) => 0,
+    (:rrqr_rect_solver, 2) => 0,   (:rrqr_rect_solver, 3) => 0,   (:rrqr_rect_solver, 4) => 0,
+    # repeated reconfigure!/prepare! warm path
+    (:reconfigure_prepare, 2) => 0, (:reconfigure_prepare, 3) => 0, (:reconfigure_prepare, 4) => 0,
+    # lightweight metadata accessors (0-byte; size() is a Julia-level 32-byte cost)
+    (:numerical_rank, 2) => 0,     (:numerical_rank, 3) => 0,     (:numerical_rank, 4) => 0,
+    (:factor_state, 2) => 0,       (:factor_state, 3) => 0,       (:factor_state, 4) => 0,
+    (:factor_status, 2) => 0,      (:factor_status, 3) => 0,      (:factor_status, 4) => 0,
+    (:eltype, 2) => 0,             (:eltype, 3) => 0,             (:eltype, 4) => 0,
     # GEMM direct / forced-packed (with a prepared GemmWorkspace)
     (:gemm_direct, 2) => 64,        (:gemm_direct, 3) => 64,        (:gemm_direct, 4) => 96,
     (:gemm_packed, 2) => 128,       (:gemm_packed, 3) => 128,       (:gemm_packed, 4) => 160,
@@ -176,8 +195,10 @@ function measure_type(::Type{T}, n, nrhs) where {T}
     prepare!(dc, n)
     factorize!(dc, Ai)
     solve!(x, dc, b)
+    solve!(Xm, dc, Bm)
     push!(results, (:ldlt_factorize, T, measure(() -> factorize!(dc, Ai))))
     push!(results, (:ldlt_vector_solve, T, measure(() -> solve!(x, dc, b))))
+    push!(results, (:ldlt_matrix_solve, T, measure(() -> solve!(Xm, dc, Bm))))
 
     # ------------------------- RRQR -------------------------
     Ar = T.(randn(n, n))
@@ -188,6 +209,54 @@ function measure_type(::Type{T}, n, nrhs) where {T}
     push!(results, (:rrqr_factorize, T, measure(() -> factorize!(rc, Ar))))
     push!(results, (:rrqr_vector_solve, T, measure(() -> solve!(x, rc, b))))
     push!(results, (:rrqr_matrix_solve, T, measure(() -> solve!(Xm, rc, Bm))))
+
+    # RRQR rectangular apply_q! / solve_r! routes (:N and :T, vector and matrix)
+    rank = n
+    qv = copy(b); qm = copy(Bm)
+    apply_q!(qv, rc; trans=:N); apply_q!(qv, rc; trans=:T)
+    apply_q!(qm, rc; trans=:N); apply_q!(qm, rc; trans=:T)
+    solve_r!(qv, rc, rank; trans=:N); solve_r!(qv, rc, rank; trans=:T)
+    solve_r!(qm, rc, rank; trans=:N); solve_r!(qm, rc, rank; trans=:T)
+    push!(results, (:rrqr_applyq_vec_N, T, measure(() -> apply_q!(qv, rc; trans=:N))))
+    push!(results, (:rrqr_applyq_vec_T, T, measure(() -> apply_q!(qv, rc; trans=:T))))
+    push!(results, (:rrqr_applyq_mat_N, T, measure(() -> apply_q!(qm, rc; trans=:N))))
+    push!(results, (:rrqr_applyq_mat_T, T, measure(() -> apply_q!(qm, rc; trans=:T))))
+    push!(results, (:rrqr_solver_vec_N, T, measure(() -> solve_r!(qv, rc, rank; trans=:N))))
+    push!(results, (:rrqr_solver_vec_T, T, measure(() -> solve_r!(qv, rc, rank; trans=:T))))
+    push!(results, (:rrqr_solver_mat_N, T, measure(() -> solve_r!(qm, rc, rank; trans=:N))))
+    push!(results, (:rrqr_solver_mat_T, T, measure(() -> solve_r!(qm, rc, rank; trans=:T))))
+
+    # rectangular (tall) RRQR apply_q!/solve_r! route
+    mt, nt = 2 * n, n
+    Art = T.(randn(mt, nt))
+    rct = MFRRQRCache(T; config=config)
+    prepare!(rct, mt, nt)
+    factorize!(rct, Art)
+    qvt = T.(randn(mt)); qmt = T.(randn(mt, nrhs))
+    apply_q!(qvt, rct; trans=:T); apply_q!(qmt, rct; trans=:T)
+    qvt_lead = qvt[1:nt]; qmt_lead = qmt[1:nt, :]
+    solve_r!(qvt_lead, rct, nt; trans=:N); solve_r!(qmt_lead, rct, nt; trans=:N)
+    push!(results, (:rrqr_rect_applyq, T, measure(() -> apply_q!(qvt, rct; trans=:T))))
+    push!(results, (:rrqr_rect_solver, T, measure(() -> solve_r!(qvt_lead, rct, nt; trans=:N))))
+
+    # repeated reconfigure!/prepare! warm path (0-byte after the first prepare)
+    rcfg = KernelConfig(thread_count=1, gemm_strategy=:packed, gemm_panel_columns=4)
+    rcache = MFLUCache(T; config=config)
+    prepare!(rcache, n)
+    factorize!(rcache, Al)
+    reconfigure!(rcache, rcfg)
+    prepare!(rcache, n)
+    factorize!(rcache, Al)
+    push!(results, (:reconfigure_prepare, T, measure(() -> begin
+        reconfigure!(rcache, rcfg)
+        prepare!(rcache, n)
+    end)))
+
+    # lightweight metadata accessors (0-byte)
+    push!(results, (:numerical_rank, T, measure(() -> numerical_rank(rc))))
+    push!(results, (:factor_state, T, measure(() -> factor_state(rc))))
+    push!(results, (:factor_status, T, measure(() -> factor_status(rc))))
+    push!(results, (:eltype, T, measure(() -> eltype(rc))))
 
     # ------------------------- direct GEMM -------------------------
     C = zeros(T, n, n); G1 = T.(randn(n, n)); G2 = T.(randn(n, n))

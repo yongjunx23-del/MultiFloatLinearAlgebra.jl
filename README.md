@@ -153,12 +153,13 @@ passing a different `config` to the hot path. Pure
 `workspace_requirements` / `factor_cache_requirements` queries let callers
 reserve all storage before any numerical work.
 
-**Allocation status (honest).** Warm **vector** `solve!` is 0-byte; warm
-**matrix** `solve!` allocates only the shared triangular-kernel dispatch floor
-(bounded and identical across calls). `factorize!` is **not** zero-allocation —
-it still allocates a small non-zero amount from kernel dispatch and `@view`
-subarray creation, which is under active elimination and tracked by the
-allocation gate.
+**Allocation status (honest).** Warm **vector** and **matrix** `solve!` are both
+0-byte, and all four `factorize!` paths (Cholesky / LU / LDLT / RRQR) are
+0-byte on the warm single-threaded path — all gated by
+`benchmark/allocation_gate.jl --check`. The only remaining allocations are the
+public `gemm!`/`gemmt!` `GemmPlan` struct and threaded-task objects
+(`@sync`/`Threads.@spawn`), which are framework cost reported separately and not
+part of the cache-core gate.
 
 See [`docs/FACTOR_CACHE.md`](docs/FACTOR_CACHE.md) for the full API and
 lifecycle, [`docs/FACTOR_CACHE_LIFECYCLE.md`](docs/FACTOR_CACHE_LIFECYCLE.md)

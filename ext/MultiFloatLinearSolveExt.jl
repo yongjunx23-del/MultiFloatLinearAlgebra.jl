@@ -81,9 +81,15 @@ function LinearSolve.init_cacheval(
 end
 
 function _failure_solution(cache, alg)
+    u = cache.u
+    # On LinearSolve 2.22 a matrix RHS yields a Vector `cache.u`; shape the
+    # failure solution like the RHS so success and failure agree.
+    if cache.b isa AbstractMatrix && u isa AbstractVector
+        u = Matrix{eltype(u)}(undef, size(cache.b))
+    end
     return SciMLBase.build_linear_solution(
         alg,
-        cache.u,
+        u,
         nothing,
         cache;
         retcode=SciMLBase.ReturnCode.Failure,
@@ -108,6 +114,22 @@ function _factorize!(cache, alg)
     return cacheval
 end
 
+# Solve into a correctly-shaped destination. On LinearSolve 2.22 a matrix RHS
+# yields a Vector `cache.u` (its `__init_u0_from_Ab` has no `b::AbstractMatrix`
+# method), so we allocate a matrix and solve into it; on 5.x `cache.u` is
+# already a Matrix and the zero-alloc fast path is preserved.
+function _solve_into!(cache, cacheval, alg)
+    b = cache.b
+    u = cache.u
+    if b isa AbstractMatrix && u isa AbstractVector
+        X = Matrix{eltype(u)}(undef, size(b))
+        MFLA.solve!(X, cacheval, b; config=alg.config)
+        return X
+    end
+    MFLA.solve!(u, cacheval, b; config=alg.config)
+    return u
+end
+
 function _solve!(cache, alg)
     cacheval = cache.cacheval
     if cache.isfresh
@@ -119,10 +141,10 @@ function _solve!(cache, alg)
     end
     MFLA.issuccess(cacheval) || return _failure_solution(cache, alg)
 
-    MFLA.solve!(cache.u, cacheval, cache.b; config=alg.config)
+    u = _solve_into!(cache, cacheval, alg)
     return SciMLBase.build_linear_solution(
         alg,
-        cache.u,
+        u,
         nothing,
         cache;
         retcode=SciMLBase.ReturnCode.Success,
@@ -151,7 +173,7 @@ factor matrix (no reallocation at the same size) and is fail-closed: a failed
 factorization returns `ReturnCode.Failure` and never leaves a stale success
 behind.
 """
-function refresh!(cache::LinearSolve.LinearCache)
+function MFLA.refresh!(cache::LinearSolve.LinearCache)
     cache.isfresh = true
     return cache
 end

@@ -296,6 +296,16 @@ for the cache's current factorization. Vector-valued fields are copies. A cache
 in the invalidated state reports `state=:invalidated` and `success=false`.
 """
 function factor_diagnostics(cache::MFCholeskyCache{MF}) where {MF<:MultiFloat}
+    state = factor_state(cache)
+    if state === :invalidated || state === :reconfigure_requires_prepare
+        return (
+            kind=:cholesky, status=factor_status(cache), state=state, success=false,
+            precision=factor_precision(cache), provider=factor_provider(cache),
+            failure_location=nothing, accepted_pivots=0,
+            minimum_diagonal=nothing, maximum_diagonal=nothing, diagonal_spread=nothing,
+            finite=nothing,
+        )
+    end
     n = size(cache.factors, 1)
     accepted = cache.status == 0 ? n : cache.status > 0 ? cache.status - 1 : 0
     minimum_diagonal, maximum_diagonal =
@@ -317,13 +327,26 @@ function factor_diagnostics(cache::MFCholeskyCache{MF}) where {MF<:MultiFloat}
 end
 
 function factor_diagnostics(cache::MFLUCache{MF}) where {MF<:MultiFloat}
+    state = factor_state(cache)
+    if state === :invalidated || state === :reconfigure_requires_prepare
+        return (
+            kind=:lu, status=factor_status(cache), state=state, success=false,
+            precision=factor_precision(cache), provider=factor_provider(cache),
+            failure_location=nothing, accepted_pivots=0,
+            pivots=nothing, minimum_pivot=nothing, maximum_pivot=nothing,
+            original_maximum=nothing, maximum_u=nothing, pivot_growth=nothing,
+            finite=nothing,
+        )
+    end
     accepted = cache.status > 0 ? cache.status - 1 :
                cache.status == 0 ? length(cache.ipiv) : 0
     minimum_pivot, maximum_pivot =
         _diagonal_magnitude_range(cache.factors, accepted)
-    maximum_u = _lu_maximum_u(cache)
+    # A nonfinite input (status == -1) leaves no meaningful U maximum or pivot
+    # growth; report them as nothing rather than NaN.
+    maximum_u = factor_status(cache) == -1 ? nothing : _lu_maximum_u(cache)
     pivot_growth = iszero(cache.original_maximum) ? nothing :
-        maximum_u / cache.original_maximum
+        maximum_u === nothing ? nothing : maximum_u / cache.original_maximum
     return (
         kind=:lu,
         status=factor_status(cache),
@@ -344,6 +367,18 @@ function factor_diagnostics(cache::MFLUCache{MF}) where {MF<:MultiFloat}
 end
 
 function factor_diagnostics(cache::MFLDLTCache{MF}) where {MF<:MultiFloat}
+    state = factor_state(cache)
+    if state === :invalidated || state === :reconfigure_requires_prepare
+        return (
+            kind=:ldlt, status=factor_status(cache), state=state, success=false,
+            precision=factor_precision(cache), provider=factor_provider(cache),
+            failure_location=nothing, one_by_one_pivots=0, two_by_two_pivots=0,
+            pivots=nothing, blocks=nothing, inertia=nothing,
+            minimum_block_eigenvalue_magnitude=nothing, minimum_scaled_block=nothing,
+            original_maximum=nothing, maximum_block_entry=nothing, block_growth=nothing,
+            finite=nothing,
+        )
+    end
     one_by_one = 0
     two_by_two = 0
     minimum_block = nothing
@@ -432,6 +467,16 @@ function factor_diagnostics(
     atol::Real=zero(MF),
     rtol::Real=zero(MF),
 ) where {MF<:MultiFloat}
+    state = factor_state(cache)
+    if state === :invalidated || state === :reconfigure_requires_prepare
+        return (
+            kind=:rrqr, status=factor_status(cache), state=state, success=false,
+            precision=factor_precision(cache), provider=factor_provider(cache),
+            failure_location=nothing, permutation=nothing, rdiag=nothing,
+            minimum_rdiag=nothing, maximum_rdiag=nothing, rdiag_spread=nothing,
+            rank_at_threshold=0, atol=MF(atol), rtol=MF(rtol), finite=nothing,
+        )
+    end
     diagonal_count = min(size(cache.factors)...)
     diagonal = Vector{MF}(undef, diagonal_count)
     @inbounds for index in 1:diagonal_count

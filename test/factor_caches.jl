@@ -167,6 +167,28 @@ end
         s3 = cache_allocated(() -> solve!(X2, c, B))
         s4 = cache_allocated(() -> solve!(X2, c, B))
         @test s3 == s4
+
+        # LDLT matrix solve (correctness + 0-byte warm)
+        ind = cache_indefinite(T, n)
+        ldref = MFLA.ldiv!(copy(B), MFLA.ldlt!(copy(ind); check=false, config=cfg), B)
+        ldc = MFLDLTCache(T; config=cfg)
+        prepare!(ldc, n)
+        factorize!(ldc, ind)
+        X3 = zeros(T, n, nrhs)
+        solve!(X3, ldc, B)
+        @test max_relative_error(X3, ldref) <= tolerance(T, 256)
+        @test cache_allocated(() -> solve!(X3, ldc, B)) == 0
+
+        # RRQR matrix solve (correctness + 0-byte warm)
+        qa = cache_diagdom(T, n)
+        qref = MFLA.ldiv!(copy(B), MFLA.rrqr!(copy(qa)), B)
+        qc = MFRRQRCache(T; config=cfg)
+        prepare!(qc, n)
+        factorize!(qc, qa)
+        X4 = zeros(T, n, nrhs)
+        solve!(X4, qc, B)
+        @test max_relative_error(X4, qref) <= tolerance(T, 256)
+        @test cache_allocated(() -> solve!(X4, qc, B)) == 0
     end
 end
 
@@ -258,6 +280,94 @@ end
     end
 end
 
+@testset "factor cache diagnostics states" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            n = 8
+            spd = cache_spd(T, n)
+            diagdom = cache_diagdom(T, n)
+            ind = cache_indefinite(T, n)
+
+            # fresh (unprepared) cache: numeric fields are nothing
+            for cache in (
+                MFCholeskyCache(T; config=cfg),
+                MFLUCache(T; config=cfg),
+                MFLDLTCache(T; config=cfg),
+                MFRRQRCache(T; config=cfg),
+            )
+                d = factor_diagnostics(cache)
+                @test d.success == false
+                @test d.state in (:invalidated, :reconfigure_requires_prepare)
+                @test d.finite === nothing
+            end
+
+            # prepared cache: numeric fields are nothing
+            c = MFCholeskyCache(T; config=cfg); prepare!(c, n)
+            d = factor_diagnostics(c)
+            @test d.success == false
+            @test d.minimum_diagonal === nothing
+            @test d.finite === nothing
+            l = MFLUCache(T; config=cfg); prepare!(l, n)
+            dl = factor_diagnostics(l)
+            @test dl.pivots === nothing
+            @test dl.maximum_u === nothing
+            q = MFRRQRCache(T; config=cfg); prepare!(q, n)
+            dq = factor_diagnostics(q)
+            @test dq.rdiag === nothing
+            @test dq.permutation === nothing
+            @test_throws ArgumentError factor_permutation(q)
+            @test_throws ArgumentError factor_rdiag(q)
+
+            # success diagnostics are full
+            factorize!(c, spd)
+            ds = factor_diagnostics(c)
+            @test ds.success == true
+            @test ds.minimum_diagonal isa T
+            factorize!(l, diagdom)
+            dls = factor_diagnostics(l)
+            @test dls.success == true
+            @test dls.pivots isa Vector
+            factorize!(q, diagdom)
+            @test factor_permutation(q) isa Vector{Int}
+            @test factor_rdiag(q) isa Vector{T}
+
+            # invalidated after factorize: numeric fields are nothing (not stale)
+            invalidate!(c)
+            di = factor_diagnostics(c)
+            @test di.state == :invalidated
+            @test di.minimum_diagonal === nothing
+            @test di.finite === nothing
+            invalidate!(q)
+            @test_throws ArgumentError factor_permutation(q)
+            @test_throws ArgumentError factor_rdiag(q)
+
+            # nonfinite failure: LU maximum_u/pivot_growth are nothing
+            lnf = MFLUCache(T; config=cfg); prepare!(lnf, 2)
+            factorize!(lnf, T[1 NaN; 0 1]; check=false)
+            dnf = factor_diagnostics(lnf)
+            @test dnf.state == :nonfinite_input
+            @test dnf.maximum_u === nothing
+            @test dnf.pivot_growth === nothing
+            @test dnf.original_maximum === nothing
+
+            # singular failure: meaningful fields, not nothing
+            ls = MFLUCache(T; config=cfg); prepare!(ls, 2)
+            factorize!(ls, T[1 2; 2 4]; check=false)
+            dsing = factor_diagnostics(ls)
+            @test dsing.state == :singular
+            @test dsing.failure_location isa Int
+            @test dsing.pivots isa Vector
+
+            # failure -> recovery diagnostics
+            factorize!(ls, T[4 1; 1 3]; check=false)
+            drec = factor_diagnostics(ls)
+            @test drec.success == true
+            @test drec.state == :success
+        end
+    end
+end
+
 @testset "factor cache pure requirements queries" begin
     T = Float64x2
     cfg = KernelConfig(thread_count=1)
@@ -265,7 +375,7 @@ end
     w0 = workspace_requirements(T, :lu, (n=64,), cfg)
     w1 = workspace_requirements(T, :lu, (n=64,), cfg)
     @test w0 == w1
-    @test w0.factorization == 64
+    @test w0.factor == 64
     wg = workspace_requirements(T, :gemm, (m=64, k=64, n=64), cfg)
     plan = gemm_plan(T, 64, 64, 64, cfg)
     @test wg.gemm_workers == plan.workers
@@ -280,36 +390,54 @@ end
 
 @testset "factor cache requirements/capacity consistency" begin
     for T in (Float64x2, Float64x3, Float64x4), kind in (:cholesky, :lu, :ldlt, :rrqr)
-        n = 48
-        cfg = KernelConfig(thread_count=1)
-        shape = kind === :rrqr ? (m=n, n=n) : (n=n,)
-        req = factor_cache_requirements(T, kind, shape, cfg)
-        cache = if kind === :cholesky
-            MFCholeskyCache(T; config=cfg)
-        elseif kind === :lu
-            MFLUCache(T; config=cfg)
-        elseif kind === :ldlt
-            MFLDLTCache(T; config=cfg)
-        else
-            MFRRQRCache(T; config=cfg)
+        for cfg in (KernelConfig(thread_count=1), KernelConfig(thread_count=2))
+            shapes = kind === :rrqr ?
+                ((m=48, n=48), (m=8, n=48), (m=48, n=8), (m=0, n=48), (m=48, n=0), (m=0, n=0)) :
+                ((n=48,), (n=0,))
+            for shape in shapes
+                req = factor_cache_requirements(T, kind, shape, cfg)
+                cache = if kind === :cholesky
+                    MFCholeskyCache(T; config=cfg)
+                elseif kind === :lu
+                    MFLUCache(T; config=cfg)
+                elseif kind === :ldlt
+                    MFLDLTCache(T; config=cfg)
+                else
+                    MFRRQRCache(T; config=cfg)
+                end
+                if kind === :rrqr
+                    prepare!(cache, shape.m, shape.n)
+                else
+                    prepare!(cache, shape.n)
+                end
+                cap = factor_cache_capacity(cache)
+                @test cap.matrix == req.matrix
+                @test cap.factor_matrix_elements == req.factor_matrix_elements
+                @test cap.pivots == req.pivots
+                @test cap.blocks == req.blocks
+                @test cap.dsub == req.dsub
+                @test cap.weighted_panel == req.weighted_panel
+                @test cap.tau == req.tau
+                @test cap.permutation == req.permutation
+                @test cap.cycle_leaders_capacity == req.cycle_leaders_capacity
+                @test cap.norm_scale == req.norm_scale
+                @test cap.norm_sum == req.norm_sum
+                @test cap.norm_dirty == req.norm_dirty
+                @test cap.ftranspose == req.ftranspose
+                @test cap.auxiliary == req.auxiliary
+                @test cap.gemm_workers == req.gemm_workers
+                @test cap.gemm_packed_elements_per_worker == req.gemm_packed_elements_per_worker
+            end
         end
-        prepare!(cache, n)
-        cap = factor_cache_capacity(cache)
-        @test cap.matrix == req.matrix
-        @test cap.factor_matrix_elements == req.factor_matrix_elements
-        @test cap.pivots == req.pivots
-        @test cap.blocks == req.blocks
-        @test cap.dsub == req.dsub
-        @test cap.weighted_panel == req.weighted_panel
-        @test cap.tau == req.tau
-        @test cap.permutation == req.permutation
-        @test cap.cycle_leaders_capacity == req.cycle_leaders_capacity
-        @test cap.norm_scale == req.norm_scale
-        @test cap.norm_sum == req.norm_sum
-        @test cap.norm_dirty == req.norm_dirty
-        @test cap.ftranspose == req.ftranspose
-        @test cap.auxiliary == req.auxiliary
     end
+    # negative dimensions and overflow are rejected by the pure query
+    T = Float64x2
+    cfg = KernelConfig(thread_count=1)
+    @test_throws ArgumentError factor_cache_requirements(T, :rrqr, (m=-1, n=5), cfg)
+    @test_throws ArgumentError workspace_requirements(T, :lu, (n=-3,), cfg)
+    @test_throws Exception factor_cache_requirements(
+        T, :rrqr, (m=typemax(Int) ÷ 2, n=typemax(Int) ÷ 2), cfg,
+    )
 end
 
 # The required fail-closed regression: successful factorize -> failing
@@ -389,6 +517,9 @@ end
     # reconfigure! invalidates and, with prepare!, makes the new config the frozen one
     reconfigure!(c, cfg2)
     @test !issuccess(c)
+    @test factor_state(c) == :reconfigure_requires_prepare
+    # reconfigure! without prepare! must make factorize! refuse (fail-closed)
+    @test_throws ArgumentError factorize!(c, A)
     prepare!(c, n)
     factorize!(c, A)
     @test issuccess(c)
@@ -399,6 +530,16 @@ end
     prepare!(cc, n)
     factorize!(cc, spd)
     @test_throws ArgumentError factorize!(cc, spd; config=cfg2)
+    # shape change requires explicit prepare: mutating the live factor storage
+    # must not let factorize! run at a new size without prepare!
+    c3 = MFLUCache(T; config=cfg)
+    prepare!(c3, n)
+    factorize!(c3, A)
+    c3.factors = Matrix{T}(undef, n + 4, n + 4)
+    @test_throws ArgumentError factorize!(c3, cache_diagdom(T, n + 4))
+    prepare!(c3, n + 4)
+    factorize!(c3, cache_diagdom(T, n + 4))
+    @test issuccess(c3)
 end
 
 @testset "rectangular RRQR cache route" begin
@@ -447,6 +588,63 @@ end
             @test issuccess(qw)
             @test numerical_rank(qw) == mw
             @test length(factor_permutation(qw)) == nw
+        end
+    end
+end
+
+@testset "RRQR cache solve_r! trans and apply_q! routes" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        @testset "$T" begin
+            cfg = KernelConfig(thread_count=1)
+            n = 8
+            A = cache_diagdom(T, n)
+            qc = MFRRQRCache(T; config=cfg)
+            prepare!(qc, n, n)
+            factorize!(qc, A)
+            rank = n
+            # extract the leading R block
+            R = zeros(T, rank, rank)
+            for c in 1:rank, r in 1:c
+                R[r, c] = factor_matrix(qc)[r, c]
+            end
+
+            # R*x=b and R'*x=b (vector)
+            xref = T.(randn(rank))
+            bN = R * xref
+            xN = copy(bN)
+            solve_r!(xN, qc, rank; trans=:N)
+            @test max_relative_error(xN, xref) <= tolerance(T, 32rank)
+            bT = transpose(R) * xref
+            xT = copy(bT)
+            solve_r!(xT, qc, rank; trans=:T)
+            @test max_relative_error(xT, xref) <= tolerance(T, 32rank)
+
+            # R*X=B and R'*X=B (matrix)
+            Xref = T.(randn(rank, 3))
+            BN = R * Xref
+            XN = copy(BN)
+            solve_r!(XN, qc, rank; trans=:N)
+            @test max_relative_error(XN, Xref) <= tolerance(T, 32rank)
+            BT = transpose(R) * Xref
+            XT = copy(BT)
+            solve_r!(XT, qc, rank; trans=:T)
+            @test max_relative_error(XT, Xref) <= tolerance(T, 32rank)
+
+            # apply_q! round-trip :N/:T for vector and matrix
+            v = T.(randn(n))
+            vr = copy(v)
+            apply_q!(vr, qc; trans=:T)
+            apply_q!(vr, qc; trans=:N)
+            @test max_relative_error(vr, v) <= tolerance(T, 64n)
+            M = T.(randn(n, 3))
+            Mr = copy(M)
+            apply_q!(Mr, qc; trans=:T)
+            apply_q!(Mr, qc; trans=:N)
+            @test max_relative_error(Mr, M) <= tolerance(T, 64n)
+
+            # invalid trans throws
+            @test_throws ArgumentError solve_r!(copy(bN), qc, rank; trans=:bad)
+            @test_throws ArgumentError apply_q!(copy(v), qc; trans=:bad)
         end
     end
 end

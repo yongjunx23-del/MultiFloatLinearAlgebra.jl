@@ -12,7 +12,10 @@ allocation-free and deterministic.
 
 function MFCholeskyCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<:MultiFloat}
     _check_supported(MF)
-    return MFCholeskyCache{MF}(Matrix{MF}(undef, 0, 0), _FACTOR_CACHE_INVALID, config)
+    return MFCholeskyCache{MF}(
+        Matrix{MF}(undef, 0, 0), _FACTOR_CACHE_INVALID, config,
+        zero(UInt), zero(UInt), (0, 0),
+    )
 end
 
 """
@@ -26,6 +29,8 @@ function prepare!(cache::MFCholeskyCache{MF}, n::Integer; nrhs::Integer=1) where
     n >= 0 || throw(ArgumentError("matrix size must be nonnegative"))
     nrhs >= 1 || throw(ArgumentError("nrhs must be positive"))
     size(cache.factors, 1) == n || (cache.factors = Matrix{MF}(undef, n, n))
+    cache.prepared_shape = (n, n)
+    cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -41,8 +46,7 @@ function factorize!(
     n == size(A, 2) || throw(DimensionMismatch("cholesky cache requires a square matrix"))
     _check_supported(MF)
     Base.require_one_based_indexing(A)
-    size(cache.factors, 1) == n ||
-        throw(ArgumentError("cache prepared for size $(size(cache.factors, 1)); call prepare!(cache, $n) first"))
+    _check_prepared(cache, (n, n))
     # Fail-closed: invalidate before touching numerical storage so an unexpected
     # exception can never leave a stale success behind.
     invalidate!(cache)
@@ -114,8 +118,8 @@ function MFLUCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<:M
         Int[],
         _FACTOR_CACHE_INVALID,
         zero(MF),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         config,
+        zero(UInt), zero(UInt), (0, 0),
     )
 end
 
@@ -124,7 +128,8 @@ function prepare!(cache::MFLUCache{MF}, n::Integer; nrhs::Integer=1) where {MF<:
     nrhs >= 1 || throw(ArgumentError("nrhs must be positive"))
     size(cache.factors, 1) == n || (cache.factors = Matrix{MF}(undef, n, n))
     length(cache.ipiv) == n || (cache.ipiv = Vector{Int}(undef, n))
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
+    cache.prepared_shape = (n, n)
+    cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -139,8 +144,7 @@ function factorize!(
     m, n = size(A)
     _check_supported(MF)
     Base.require_one_based_indexing(A)
-    size(cache.factors) == (m, n) ||
-        throw(ArgumentError("cache prepared for size $(size(cache.factors)); call prepare!(cache, $m) first"))
+    _check_prepared(cache, (m, n))
     # Fail-closed: invalidate before touching numerical storage.
     invalidate!(cache)
     copyto!(cache.factors, A)
@@ -206,8 +210,8 @@ function MFLDLTCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Matrix{MF}(undef, 0, 0),
         _FACTOR_CACHE_INVALID,
         zero(MF),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         config,
+        zero(UInt), zero(UInt), (0, 0),
     )
 end
 
@@ -225,7 +229,8 @@ function prepare!(cache::MFLDLTCache{MF}, n::Integer; nrhs::Integer=1) where {MF
     if block_capacity > 0 && (size(cache.weighted, 1) != n || size(cache.weighted, 2) < block_capacity + 1)
         cache.weighted = Matrix{MF}(undef, n, block_capacity + 1)
     end
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
+    cache.prepared_shape = (n, n)
+    cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -241,8 +246,7 @@ function factorize!(
     n == size(A, 2) || throw(DimensionMismatch("ldlt cache requires a square matrix"))
     _check_supported(MF)
     Base.require_one_based_indexing(A)
-    size(cache.factors, 1) == n ||
-        throw(ArgumentError("cache prepared for size $(size(cache.factors, 1)); call prepare!(cache, $n) first"))
+    _check_prepared(cache, (n, n))
     # Fail-closed: invalidate before touching numerical storage.
     invalidate!(cache)
     copyto!(cache.factors, A)
@@ -424,9 +428,9 @@ function MFRRQRCache(::Type{MF}; config::KernelConfig=KernelConfig()) where {MF<
         Vector{Bool}(undef, 0),
         Matrix{MF}(undef, 0, 0),
         Vector{MF}(undef, 0),
-        GemmWorkspace(MF; thread_count=config.thread_count, capacity=0),
         _FACTOR_CACHE_INVALID,
         config,
+        zero(UInt), zero(UInt), (0, 0),
     )
 end
 
@@ -452,12 +456,16 @@ function prepare!(
     length(cache.norm_sum) == n || (cache.norm_sum = Vector{MF}(undef, n))
     length(cache.norm_dirty) == n || (cache.norm_dirty = Vector{Bool}(undef, n))
     block_size = min(_QR_BLOCK_SIZE, reflector_count)
-    if size(cache.ftranspose, 1) < block_size || size(cache.ftranspose, 2) < n
-        cache.ftranspose = Matrix{MF}(undef, max(block_size, 1), n)
+    # Always reserve at least one row so the zero-reflector (m=0 or n=0) case
+    # matches factor_cache_requirements exactly; the buffer is unused there.
+    alloc_rows = max(block_size, 1)
+    if size(cache.ftranspose, 1) < alloc_rows || size(cache.ftranspose, 2) < n
+        cache.ftranspose = Matrix{MF}(undef, alloc_rows, n)
     end
-    length(cache.auxiliary) < block_size &&
-        (cache.auxiliary = Vector{MF}(undef, max(block_size, 1)))
-    _prepare_gemm_workspace!(cache.gemm, max(cache.config.thread_count, 1), 0)
+    length(cache.auxiliary) < alloc_rows &&
+        (cache.auxiliary = Vector{MF}(undef, alloc_rows))
+    cache.prepared_shape = (m, n)
+    cache.prepared_epoch = cache.config_epoch
     cache.status = _FACTOR_CACHE_INVALID
     return cache
 end
@@ -466,19 +474,17 @@ function factorize!(
     cache::MFRRQRCache{MF},
     A::AbstractMatrix{MF};
     check::Bool=true,
-    threads::Int=cache.config.thread_count,
     config::KernelConfig=cache.config,
 ) where {MF<:MultiFloat}
     _check_config_frozen(cache, config)
     m, n = size(A)
     _check_supported(MF)
     Base.require_one_based_indexing(A)
-    size(cache.factors) == (m, n) ||
-        throw(ArgumentError("cache prepared for size $(size(cache.factors)); call prepare!(cache, $m, $n) first"))
+    _check_prepared(cache, (m, n))
     # Fail-closed: invalidate before touching numerical storage.
     invalidate!(cache)
     copyto!(cache.factors, A)
-    status = _factorize_rrqr!(cache, false, threads, config)
+    status = _factorize_rrqr!(cache, false, cache.config.thread_count, config)
     cache.status = status
     check && !iszero(status) && throw(ArgumentError("rrqr!: input contains non-finite entries"))
     return cache
@@ -567,7 +573,7 @@ function _cache_apply_q!(destination, cache::MFRRQRCache{MF}; trans::Symbol=:N) 
     for step in steps
         _cache_apply_reflector!(destination, cache, step)
     end
-    return destination
+    return nothing
 end
 
 function _cache_apply_reflector!(destination::AbstractVector{MF}, cache, step::Int) where {MF<:MultiFloat}
@@ -602,15 +608,22 @@ function _cache_apply_reflector!(destination::AbstractMatrix{MF}, cache, step::I
     return nothing
 end
 
-function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; config) where {MF<:MultiFloat}
-    rank == 0 && return destination
+function _cache_solve_r!(destination, cache::MFRRQRCache{MF}, rank::Int; trans::Symbol=:N, config) where {MF<:MultiFloat}
+    rank == 0 && return nothing
     if destination isa AbstractVector
-        leading = @view cache.factors[1:rank, 1:rank]
-        trsv!(destination, leading; uplo=:upper, trans=:N, diag=:nonunit, config=config)
+        if trans === :N
+            _trsv_leading_upper!(destination, cache.factors, rank)
+        else
+            _trsv_leading_upper_trans!(destination, cache.factors, rank)
+        end
     else
-        _trsm_leading_upper!(destination, cache.factors, rank)
+        if trans === :N
+            _trsm_leading_upper!(destination, cache.factors, rank)
+        else
+            _trsm_leading_upper_trans!(destination, cache.factors, rank)
+        end
     end
-    return destination
+    return nothing
 end
 
 # Count-aware cycle permutation over the fixed-capacity leaders buffer, so no
@@ -721,7 +734,8 @@ function apply_q!(
         throw(DimensionMismatch("apply_q! destination row count differs"))
     Base.mightalias(destination, cache.factors) &&
         throw(ArgumentError("apply_q! destination must not alias QR storage"))
-    return _cache_apply_q!(destination, cache; trans=trans)
+    _cache_apply_q!(destination, cache; trans=trans)
+    return destination
 end
 
 """
@@ -754,7 +768,8 @@ function solve_r!(
         iszero(cache.factors[index, index]) &&
             throw(LinearAlgebra.SingularException(index))
     end
-    return _cache_solve_r!(destination, cache, rank_value; config=config)
+    _cache_solve_r!(destination, cache, rank_value; trans=trans, config=config)
+    return destination
 end
 
 """
@@ -797,16 +812,21 @@ end
     factor_permutation(cache::MFRRQRCache) -> Vector{Int}
 
 Return a caller-owned copy of the column permutation `p` satisfying
-`A_original[:, p] = Q * R`.
+`A_original[:, p] = Q * R`. Requires a successful QR cache.
 """
-factor_permutation(cache::MFRRQRCache) = copy(cache.permutation)
+function factor_permutation(cache::MFRRQRCache)
+    issuccess(cache) || throw(ArgumentError("factor_permutation requires a successful QR cache"))
+    return copy(cache.permutation)
+end
 
 """
     factor_rdiag(cache::MFRRQRCache) -> Vector{MF}
 
 Return a copy of the signed diagonal of the compactly stored `R` factor.
+Requires a successful QR cache.
 """
 function factor_rdiag(cache::MFRRQRCache{MF}) where {MF<:MultiFloat}
+    issuccess(cache) || throw(ArgumentError("factor_rdiag requires a successful QR cache"))
     diagonal_count = min(size(cache.factors)...)
     diagonal = Vector{MF}(undef, diagonal_count)
     @inbounds for index in 1:diagonal_count
