@@ -114,3 +114,21 @@ end
         return acc + x * y
     end
 end
+
+@inline function _structured_mulacc(
+    acc::MultiFloatVec{4,Float64,4},
+    x::MultiFloatVec{4,Float64,4},
+    y::MultiFloatVec{4,Float64,4},
+)
+    # Same compile-time gate as the x3 structured route: positive AArch64
+    # evidence is Apple silicon only, so other AArch64 CPUs keep the
+    # standard accumulation.  The x4 fused network passed the committed
+    # adversarial differential suite (bitwise identity over random /
+    # wide-range / cancellation / alternating-sign / near-underflow /
+    # near-overflow / zero, BigFloat ratio 1.0).
+    @static if Sys.isapple() && Sys.ARCH === :aarch64
+        return mulacc_x4(acc, x, y)
+    else
+        return acc + x * y
+    end
+end

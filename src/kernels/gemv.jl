@@ -18,7 +18,9 @@ function _gemv_rows!(
                 A[row + 2, column],
                 A[row + 3, column],
             )
-            accumulator += values * V4(x[column])
+            accumulator = _structured_mulacc(
+                accumulator, values, V4(x[column]),
+            )
         end
         result = if beta == zero(MF)
             V4(alpha) * accumulator
@@ -65,7 +67,9 @@ function _gemv_t_columns!(
                 A[row, column + 2],
                 A[row, column + 3],
             )
-            accumulator += values * V4(x[row])
+            accumulator = _structured_mulacc(
+                accumulator, values, V4(x[row]),
+            )
         end
         result = if beta == zero(MF)
             V4(alpha) * accumulator
