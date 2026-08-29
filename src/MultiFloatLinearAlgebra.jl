@@ -64,6 +64,26 @@ function MultiFloatCholesky(; config::KernelConfig=KernelConfig())
     return getproperty(_linearsolve_extension(), :MultiFloatCholesky)(config)
 end
 
+"""Whether the optional QDLDL sparse-LDL extension is loaded for `MF`."""
+sparse_ldlt_available(::Type{MF}) where {MF<:MultiFloat} =
+    Base.get_extension(@__MODULE__, :MultiFloatQDLDLExt) !== nothing
+
+"""
+    sparse_ldlt_cache(MF, pattern; kwargs...)
+
+Construct the optional QDLDL-backed sparse LDL cache for a frozen upper-
+triangular CSC `pattern`. QDLDL owns symbolic/numeric LDL; MFLA owns the
+MultiFloat type and cache contract. Loading QDLDL is explicit and absence
+fails closed.
+"""
+function sparse_ldlt_cache(::Type{MF}, pattern; kwargs...) where {MF<:MultiFloat}
+    extension = Base.get_extension(@__MODULE__, :MultiFloatQDLDLExt)
+    extension === nothing && throw(ArgumentError(
+        "load QDLDL before constructing a MultiFloat sparse LDL cache",
+    ))
+    return getproperty(extension, :MFSparseLDLCache)(MF, pattern; kwargs...)
+end
+
 export KernelConfig, GemmWorkspace, MFWorkspace
 export workspace_capacity, ensure_workspace_capacity!
 export GemmPlan, GemmProfile, GemmMeasurement, GemmCalibration, LDLTPlan
@@ -81,6 +101,7 @@ export ldiv!, solve
 export residual!, residual_mixed!, normwise_backward_error, refinement_correction!
 export capabilities
 export MultiFloatLU, MultiFloatCholesky
+export sparse_ldlt_available, sparse_ldlt_cache
 export AbstractMFFactorCache, MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache
 export prepare!, factorize!, solve!, invalidate!, reconfigure!, refresh!
 export workspace_requirements, factor_cache_requirements, factor_cache_capacity
