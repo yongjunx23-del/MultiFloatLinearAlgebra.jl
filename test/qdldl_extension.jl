@@ -92,13 +92,14 @@ end
             # Numeric mutation after factorization invalidates solve authority.
             cache.matrix.nzval[1] += one(T)
             @test_throws ArgumentError MultiFloatLinearAlgebra.solve!(cache, x, b)
+            @test factor_state(cache) === :invalidated
             factorize!(cache, A2)
 
             # Internal structural mutation is detected independently of input.
             saved_row = cache.matrix.rowval[2]
             cache.matrix.rowval[2] = saved_row == 1 ? 2 : 1
             @test_throws ArgumentError factorize!(cache, A2)
-            @test factor_state(cache) !== :success
+            @test factor_state(cache) === :invalidated
             cache.matrix.rowval[2] = saved_row
             factorize!(cache, A2)
 
@@ -106,7 +107,7 @@ end
                 3, 3, [1, 2, 4, 5], copy(A2.rowval[1:4]), copy(A2.nzval[1:4]),
             )
             @test_throws ArgumentError factorize!(cache, drift)
-            @test factor_state(cache) !== :success
+            @test factor_state(cache) === :invalidated
 
             # A failed refactor is stale; success-only diagnostics are cleared.
             factorize!(cache, A2)

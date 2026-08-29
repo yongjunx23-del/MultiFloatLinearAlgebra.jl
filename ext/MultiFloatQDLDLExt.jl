@@ -164,6 +164,13 @@ function MFLA.factorize!(
     _revoke_factor!(cache)
     try
         _validate_numeric(cache, A)
+    catch
+        # Input/authority rejection is not a provider numerical breakdown.
+        # The attempt-entry revocation remains authoritative.
+        check && rethrow()
+        return cache
+    end
+    try
         copyto!(cache.matrix.nzval, A.nzval)
         factor = something(cache.factor)
         QDLDL.update_values!(factor, cache.indices, cache.matrix.nzval)
@@ -188,9 +195,16 @@ function MFLA.factorize!(
 end
 
 function _validate_solve_authority(cache::MFSparseLDLCache)
-    _validate_authority(cache)
-    cache.factor_values_valid && cache.matrix.nzval == cache.factored_values ||
-        throw(ArgumentError("QDLDL sparse LDL numeric factor is stale"))
+    try
+        _validate_authority(cache)
+        cache.factor_values_valid && cache.matrix.nzval == cache.factored_values ||
+            throw(ArgumentError("QDLDL sparse LDL numeric factor is stale"))
+    catch
+        # Out-of-band structural/value drift revokes both solve authority and
+        # success diagnostics before the rejection escapes.
+        _revoke_factor!(cache)
+        rethrow()
+    end
     return nothing
 end
 
