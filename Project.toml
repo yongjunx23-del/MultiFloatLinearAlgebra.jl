@@ -6,30 +6,36 @@ version = "0.3.0"
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [weakdeps]
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
+QDLDL = "bfc457fd-c171-5ab7-bd9e-d5dbfc242d63"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 
 [extensions]
 MultiFloatLinearSolveExt = ["LinearSolve", "SciMLBase"]
+MultiFloatQDLDLExt = "QDLDL"
 
 [compat]
 Aqua = "0.8"
 LinearAlgebra = "1"
 LinearSolve = "2.22, 3.83, 4, 5"
 MultiFloats = "3.2"
+QDLDL = "0.4"
 Random = "1"
 SciMLBase = "2, 3"
+SparseArrays = "1"
 Test = "1"
 julia = "1.9"
 
 [extras]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
+QDLDL = "bfc457fd-c171-5ab7-bd9e-d5dbfc242d63"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Aqua", "LinearSolve", "Random", "SciMLBase", "Test"]
+test = ["Aqua", "LinearSolve", "QDLDL", "Random", "SciMLBase", "Test"]
