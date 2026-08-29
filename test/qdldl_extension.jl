@@ -1,4 +1,4 @@
-using QDLDL
+import QDLDL
 using SparseArrays
 
 function _qdldl_upper(::Type{T}; shift=zero(T)) where {T}
