@@ -35,14 +35,46 @@ function _gemv_rows!(
         row += 4
     end
 
-    for scalar_row in row:last_row
-        accumulator = zero(MF)
-        for column in axes(A, 2)
-            accumulator += A[scalar_row, column] * x[column]
-        end
-        y[scalar_row] = beta == zero(MF) ?
-            alpha * accumulator :
-            alpha * accumulator + beta * y[scalar_row]
+    tail = last_row - row + 1
+    if tail == 3
+        _gemv_rows_tail!(y, A, x, alpha, beta, Val(3), row)
+    elseif tail == 2
+        _gemv_rows_tail!(y, A, x, alpha, beta, Val(2), row)
+    elseif tail == 1
+        _gemv_rows_tail!(y, A, x, alpha, beta, Val(1), row)
+    end
+    return nothing
+end
+
+# Tail rows (1..3) of a row-oriented gemv.  `MultiFloatVec{L}` lanes run the
+# exact scalar accumulation tree per row, so outputs are bit-identical to
+# the previous per-row scalar loop while keeping SIMD lanes for row counts
+# that are not a multiple of four.
+@inline function _gemv_rows_tail!(
+    y::AbstractVector{MF},
+    A::AbstractMatrix{MF},
+    x::AbstractVector{MF},
+    alpha::MF,
+    beta::MF,
+    ::Val{L},
+    row::Int,
+) where {T,N,L,MF<:MultiFloat{T,N}}
+    VL = MultiFloatVec{L,T,N}
+    accumulator = zero(VL)
+    @inbounds for column in axes(A, 2)
+        values = VL(ntuple(l -> A[row + l - 1, column], L))
+        coefficient = VL(ntuple(_ -> x[column], L))
+        accumulator += values * coefficient
+    end
+    result = if iszero(beta)
+        VL(ntuple(_ -> alpha, L)) * accumulator
+    else
+        VL(ntuple(_ -> alpha, L)) * accumulator +
+        VL(ntuple(_ -> beta, L)) *
+        VL(ntuple(l -> y[row + l - 1], L))
+    end
+    @inbounds for lane in 1:L
+        y[row + lane - 1] = result[lane]
     end
     return nothing
 end
@@ -84,14 +116,45 @@ function _gemv_t_columns!(
         column += 4
     end
 
-    for scalar_column in column:last_column
-        accumulator = zero(MF)
-        for row in axes(A, 1)
-            accumulator += A[row, scalar_column] * x[row]
-        end
-        y[scalar_column] = beta == zero(MF) ?
-            alpha * accumulator :
-            alpha * accumulator + beta * y[scalar_column]
+    tail = last_column - column + 1
+    if tail == 3
+        _gemv_t_columns_tail!(y, A, x, alpha, beta, Val(3), column)
+    elseif tail == 2
+        _gemv_t_columns_tail!(y, A, x, alpha, beta, Val(2), column)
+    elseif tail == 1
+        _gemv_t_columns_tail!(y, A, x, alpha, beta, Val(1), column)
+    end
+    return nothing
+end
+
+# Tail columns (1..3) of a transpose-oriented gemv.  `MultiFloatVec{L}`
+# lanes run the exact scalar accumulation tree per column, so outputs are
+# bit-identical to the previous per-column scalar loop.
+@inline function _gemv_t_columns_tail!(
+    y::AbstractVector{MF},
+    A::AbstractMatrix{MF},
+    x::AbstractVector{MF},
+    alpha::MF,
+    beta::MF,
+    ::Val{L},
+    column::Int,
+) where {T,N,L,MF<:MultiFloat{T,N}}
+    VL = MultiFloatVec{L,T,N}
+    accumulator = zero(VL)
+    @inbounds for row in axes(A, 1)
+        values = VL(ntuple(l -> A[row, column + l - 1], L))
+        coefficient = VL(ntuple(_ -> x[row], L))
+        accumulator += values * coefficient
+    end
+    result = if iszero(beta)
+        VL(ntuple(_ -> alpha, L)) * accumulator
+    else
+        VL(ntuple(_ -> alpha, L)) * accumulator +
+        VL(ntuple(_ -> beta, L)) *
+        VL(ntuple(l -> y[column + l - 1], L))
+    end
+    @inbounds for lane in 1:L
+        y[column + lane - 1] = result[lane]
     end
     return nothing
 end

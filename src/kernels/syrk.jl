@@ -37,14 +37,47 @@ function _syrk_column!(
         row += 4
     end
 
-    while row <= columns
-        accumulator = zero(MF)
-        for k in 1:reduction
-            accumulator += panel[k, row] * panel[k, column]
-        end
-        output[row, column] = iszero(beta) ? alpha * accumulator :
-            alpha * accumulator + beta * output[row, column]
-        row += 1
+    tail = columns - row + 1
+    if tail == 3
+        _syrk_tail!(output, panel, column, alpha, beta, Val(3), row)
+    elseif tail == 2
+        _syrk_tail!(output, panel, column, alpha, beta, Val(2), row)
+    elseif tail == 1
+        _syrk_tail!(output, panel, column, alpha, beta, Val(1), row)
+    end
+    return nothing
+end
+
+# Tail columns (1..3) of a lower-triangle syrk column.  `MultiFloatVec{L}`
+# lanes run the exact scalar accumulation tree per column, so the outputs
+# are bit-identical to the previous per-column scalar loop while keeping
+# SIMD lanes for panels whose column count is not a multiple of four.
+@inline function _syrk_tail!(
+    output::AbstractMatrix{MF},
+    panel::AbstractMatrix{MF},
+    column::Int,
+    alpha::MF,
+    beta::MF,
+    ::Val{L},
+    row::Int,
+) where {T,N,L,MF<:MultiFloat{T,N}}
+    VL = MultiFloatVec{L,T,N}
+    reduction = size(panel, 1)
+    accumulator = zero(VL)
+    @inbounds for k in 1:reduction
+        values = VL(ntuple(l -> panel[k, row + l - 1], L))
+        coefficient = VL(ntuple(_ -> panel[k, column], L))
+        accumulator += values * coefficient
+    end
+    result = if iszero(beta)
+        VL(ntuple(_ -> alpha, L)) * accumulator
+    else
+        VL(ntuple(_ -> alpha, L)) * accumulator +
+        VL(ntuple(_ -> beta, L)) *
+        VL(ntuple(l -> output[row + l - 1, column], L))
+    end
+    @inbounds for lane in 1:L
+        output[row + lane - 1, column] = result[lane]
     end
     return nothing
 end
