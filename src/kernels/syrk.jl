@@ -192,18 +192,41 @@ function _syrk_packed_column!(
         output_index += 4
     end
 
-    while row <= columns
-        accumulator = zero(MF)
-        for k in reduction_first:reduction_last
-            accumulator += panel[k, row] * panel[k, column]
-        end
-        output[output_index] = if iszero(beta)
-            alpha * accumulator
-        else
-            alpha * accumulator + beta * output[output_index]
-        end
-        row += 1
-        output_index += 1
+    tail = columns - row + 1
+    if tail == 3
+        _syrk_packed_tail!(output, panel, column, reduction_first, reduction_last,
+            alpha, beta, Val(3), row, output_index)
+    elseif tail == 2
+        _syrk_packed_tail!(output, panel, column, reduction_first, reduction_last,
+            alpha, beta, Val(2), row, output_index)
+    elseif tail == 1
+        _syrk_packed_tail!(output, panel, column, reduction_first, reduction_last,
+            alpha, beta, Val(1), row, output_index)
+    end
+    return nothing
+end
+
+@inline function _syrk_packed_tail!(
+    output::AbstractVector{MF}, panel::AbstractMatrix{MF}, column::Int,
+    reduction_first::Int, reduction_last::Int, alpha::MF, beta::MF,
+    ::Val{L}, row::Int, output_index::Int,
+) where {T,N,L,MF<:MultiFloat{T,N}}
+    VL = MultiFloatVec{L,T,N}
+    accumulator = zero(VL)
+    @inbounds for k in reduction_first:reduction_last
+        values = VL(ntuple(l -> panel[k, row + l - 1], L))
+        coefficient = VL(ntuple(_ -> panel[k, column], L))
+        accumulator += values * coefficient
+    end
+    result = if iszero(beta)
+        VL(ntuple(_ -> alpha, L)) * accumulator
+    else
+        VL(ntuple(_ -> alpha, L)) * accumulator +
+        VL(ntuple(_ -> beta, L)) *
+        VL(ntuple(l -> output[output_index + l - 1], L))
+    end
+    @inbounds for lane in 1:L
+        output[output_index + lane - 1] = result[lane]
     end
     return nothing
 end

@@ -39,14 +39,38 @@ function _gemmt_column!(
         row += 4
     end
 
-    while row <= rows
-        accumulator = zero(MF)
-        for k in 1:reduction
-            accumulator += left[row, k] * right[column, k]
-        end
-        output[row, column] = OVERWRITE ? alpha * accumulator :
-            alpha * accumulator + beta * output[row, column]
-        row += 1
+    tail = rows - row + 1
+    if tail == 3
+        _gemmt_tail!(output, left, right, column, alpha, beta, Val(OVERWRITE), Val(3), row)
+    elseif tail == 2
+        _gemmt_tail!(output, left, right, column, alpha, beta, Val(OVERWRITE), Val(2), row)
+    elseif tail == 1
+        _gemmt_tail!(output, left, right, column, alpha, beta, Val(OVERWRITE), Val(1), row)
+    end
+    return nothing
+end
+
+@inline function _gemmt_tail!(
+    output::AbstractMatrix{MF}, left::AbstractMatrix{MF}, right::AbstractMatrix{MF},
+    column::Int, alpha::MF, beta::MF, ::Val{OVERWRITE}, ::Val{L}, row::Int,
+) where {T,N,L,MF<:MultiFloat{T,N},OVERWRITE}
+    VL = MultiFloatVec{L,T,N}
+    reduction = size(left, 2)
+    accumulator = zero(VL)
+    @inbounds for k in 1:reduction
+        values = VL(ntuple(l -> left[row + l - 1, k], L))
+        coefficient = VL(ntuple(_ -> right[column, k], L))
+        accumulator += values * coefficient
+    end
+    result = if OVERWRITE
+        VL(ntuple(_ -> alpha, L)) * accumulator
+    else
+        VL(ntuple(_ -> alpha, L)) * accumulator +
+        VL(ntuple(_ -> beta, L)) *
+        VL(ntuple(l -> output[row + l - 1, column], L))
+    end
+    @inbounds for lane in 1:L
+        output[row + lane - 1, column] = result[lane]
     end
     return nothing
 end
