@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-30
+
+### Added
+
+- Optional QDLDL sparse signed-LDL factor-cache capability, with explicit
+  availability and authority checks.  Absent or invalid QDLDL support fails
+  closed rather than changing factorization routes.
+
+### Changed
+
+- Float64x4 structured accumulation uses a fused `mulacc_x4` kernel.
+- Packed SYRK/GEMMT and GEMV handle 1–3 trailing SIMD lanes directly rather
+  than dropping to scalar remainder loops.  The optimized paths preserve the
+  scalar arithmetic order and are covered by x4 parity tests.
+
 ## [0.3.0] - 2025-08-25
 
 ### Final contract cleanup
