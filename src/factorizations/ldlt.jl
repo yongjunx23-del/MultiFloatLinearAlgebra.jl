@@ -592,6 +592,39 @@ function _factor_ldlt_panel!(
     return (0, panel_last)
 end
 
+@inline function _build_ldlt_weighted_row!(
+    weighted::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    local_row::Int,
+    trailing_first::Int,
+    panel_first::Int,
+    panel_last::Int,
+    dsub::AbstractVector{MF},
+    blocks::AbstractVector{UInt8},
+) where {MF<:MultiFloat}
+    row = trailing_first + local_row - 1
+    q = panel_first
+    @inbounds while q <= panel_last
+        local_column = q - panel_first + 1
+        if blocks[q] == UInt8(1)
+            weighted[local_row, local_column] = A[row, q] * A[q, q]
+            q += 1
+        else
+            d11 = A[q, q]
+            d21 = dsub[q]
+            d22 = A[q + 1, q + 1]
+            first = A[row, q]
+            second = A[row, q + 1]
+            weighted[local_row, local_column] =
+                first * d11 + second * d21
+            weighted[local_row, local_column + 1] =
+                first * d21 + second * d22
+            q += 2
+        end
+    end
+    return nothing
+end
+
 function _build_ldlt_weighted_panel!(
     weighted::AbstractMatrix{MF},
     A::AbstractMatrix{MF},
@@ -599,33 +632,33 @@ function _build_ldlt_weighted_panel!(
     panel_last::Int,
     dsub::AbstractVector{MF},
     blocks::AbstractVector{UInt8},
+    config::KernelConfig=KernelConfig(),
 ) where {MF<:MultiFloat}
     trailing_first = panel_last + 1
     trailing_count = size(A, 1) - panel_last
-    q = panel_first
-    @inbounds while q <= panel_last
-        local_column = q - panel_first + 1
-        if blocks[q] == UInt8(1)
-            d = A[q, q]
-            for local_row in 1:trailing_count
-                row = trailing_first + local_row - 1
-                weighted[local_row, local_column] = A[row, q] * d
-            end
-            q += 1
-        else
-            d11 = A[q, q]
-            d21 = dsub[q]
-            d22 = A[q + 1, q + 1]
-            for local_row in 1:trailing_count
-                row = trailing_first + local_row - 1
-                first = A[row, q]
-                second = A[row, q + 1]
-                weighted[local_row, local_column] =
-                    first * d11 + second * d21
-                weighted[local_row, local_column + 1] =
-                    first * d21 + second * d22
-            end
-            q += 2
+    panel_width = panel_last - panel_first + 1
+    # Every weighted output row is independent: each row reads only frozen A,
+    # dsub, and blocks and writes a disjoint row of weighted.  Keep the q loop
+    # and its arithmetic order inside each row unchanged.  Restrict the
+    # threaded path to configs requesting all Julia workers so KernelConfig's
+    # thread_count contract remains exact; smaller requests use the original
+    # serial path with no task overhead.
+    threaded = Threads.nthreads() > 1 &&
+               config.thread_count == Threads.nthreads() &&
+               trailing_count * panel_width >= 50_000
+    if threaded
+        Threads.@threads :static for local_row in 1:trailing_count
+            _build_ldlt_weighted_row!(
+                weighted, A, local_row, trailing_first,
+                panel_first, panel_last, dsub, blocks,
+            )
+        end
+    else
+        @inbounds for local_row in 1:trailing_count
+            _build_ldlt_weighted_row!(
+                weighted, A, local_row, trailing_first,
+                panel_first, panel_last, dsub, blocks,
+            )
         end
     end
     return weighted

@@ -13,7 +13,7 @@ function _ldlt_block_trailing_update!(
     panel_width = panel_last - panel_first + 1
     weighted = @view weighted_storage[1:trailing_count, 1:panel_width]
     _build_ldlt_weighted_panel!(
-        weighted, A, panel_first, panel_last, dsub, blocks,
+        weighted, A, panel_first, panel_last, dsub, blocks, config,
     )
     L21 = @view A[(panel_last + 1):n, panel_first:panel_last]
     A22 = @view A[(panel_last + 1):n, (panel_last + 1):n]
