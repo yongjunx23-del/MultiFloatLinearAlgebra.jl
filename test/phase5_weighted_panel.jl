@@ -24,5 +24,7 @@
         threaded, A, panel_first, panel_last, dsub, blocks,
         KernelConfig(thread_count=Threads.nthreads()),
     )
-    @test serial == threaded
+    # The workspace reserves one extra column; only the active panel width is
+    # written by this helper. Exclude the intentionally untouched sentinel.
+    @test serial[:, 1:panel_last] == threaded[:, 1:panel_last]
 end

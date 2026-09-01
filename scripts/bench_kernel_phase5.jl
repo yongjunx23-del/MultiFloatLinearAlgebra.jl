@@ -81,3 +81,11 @@ for tc in (1, Threads.nthreads())
     elapsed, samples = median_time(() -> MultiFloatLinearAlgebra.trsm!(copy(rhs0), tri; config=cfg))
     println("trsm n=$nt nrhs=$nrhs workers=$tc median_s=$elapsed samples=$(join(samples, ','))")
 end
+# A vector RHS follows the inherently serial substitution dependency. Keep it
+# separate from TRSM so a multi-RHS speedup cannot be mistaken for a TRSV one.
+rhs_vec = copy(view(rhs0, :, 1))
+for tc in (1, Threads.nthreads())
+    cfg = KernelConfig(thread_count=tc)
+    elapsed, samples = median_time(() -> MultiFloatLinearAlgebra.trsv!(copy(rhs_vec), tri; config=cfg))
+    println("trsv n=$nt workers=$tc median_s=$elapsed samples=$(join(samples, ','))")
+end
