@@ -34,6 +34,37 @@ include("solve.jl")
 include("residual.jl")
 include("factor_caches.jl")
 include("factor_cache_requirements.jl")
+
+# --- rebuild packet: the M01 factor/cache/summary contract -------------------
+#
+# @integration/core-cutover. The contract layer the packet's M01 task built,
+# wired so that M02/M03/P02 and the SDPX adapter can rely on it. These three
+# files were INERT until this include: nothing referenced them, so no MFLA user
+# was protected by the contract.
+#
+# The ORDER IS MEASURED, NOT STYLISTIC (M01-F8). `factors.jl` and `workspace.jl`
+# are each standalone-includable; `summary.jl` is not, and fails alone with
+# `UndefVarError: FactorLease` because it needs `FactorLease` from factors.jl AND
+# `BlockGrammar` from workspace.jl. M01's testset 10 asserts this coupling
+# executably, including that the partial orders fail, rather than leaving it as a
+# comment. An integrator who moves summary.jl earlier gets a load-time failure,
+# not a degraded contract.
+#
+# ADDITIVE ONLY. This wires the API surface and nothing else: it does not change
+# any factorize!/solve! behaviour, does not enable a new GEMM/QR/sparse default,
+# and does not apply M01's IP-2 (which would call `record_factor_summary!` at
+# factorize commit points). IP-2 is a behaviour change and belongs to I02, whose
+# card is 逐candidate引入 new kernels and caches rather than switching defaults.
+#
+# CONSEQUENCE, recorded rather than glossed: this changes MFLA's include graph,
+# which EXPIRES the loaded-code equivalence ADR-002 §10 records against
+# `50e6e0b`. Provider measurements taken at `3ddf8ed` remain valid for the
+# numeric kernels — those are untouched and nothing new is on an execution path —
+# but "identical loaded code" is no longer true and must not be claimed.
+include("contracts/factors.jl")
+include("contracts/workspace.jl")
+include("contracts/summary.jl")
+
 include("capabilities.jl")
 
 function _linearsolve_extension()

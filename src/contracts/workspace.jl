@@ -20,9 +20,25 @@
 # adapter can convert it exactly once instead of re-deriving it per query.
 
 # Self-contained dependency declaration (see `factors.jl`).
+#
+# @integration/core-cutover: the `const MultiFloat` declaration is GUARDED.
+# Unguarded it is correct for the standalone case this file was developed in —
+# included into its own module, nothing else has bound the name — but it is a
+# hard error once the file is `include`d into `MultiFloatLinearAlgebra` itself,
+# which already binds `MultiFloat` via `import MultiFloats: MultiFloat,
+# MultiFloatVec` at src/MultiFloatLinearAlgebra.jl:7:
+#
+#   ERROR: cannot declare MultiFloatLinearAlgebra.MultiFloat constant;
+#          it was already declared as an import
+#
+# The guard keeps the standalone path working and removes the collision. It is
+# the same class of defect as S06's driver gap: a file exercised in only ONE of
+# its two inclusion modes.
 import MultiFloatLinearAlgebra
 import MultiFloats
-const MultiFloat = MultiFloats.MultiFloat
+if !isdefined(@__MODULE__, :MultiFloat)
+    const MultiFloat = MultiFloats.MultiFloat
+end
 
 # This file is independently includable, so it does not rely on a hash helper
 # defined in a sibling contract file. `_grammar_mix` is a pure integer mix with
