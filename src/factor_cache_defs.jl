@@ -208,6 +208,28 @@ factor_kind(::MFLDLTCache) = :ldlt
 factor_status(cache::MFLDLTCache) = cache.status
 factor_matrix(cache::MFLDLTCache) = cache.factors
 
+# M01 IP-3, RELOCATED HERE from `src/contracts/summary.jl`. The contract layer
+# carried these three as a local workaround and said in its own comment that "the
+# durable fix belongs in `src/factor_cache_defs.jl` at integration time" — this is
+# that move, not an addition: the definitions are deleted from `summary.jl` in the
+# same commit, so applying IP-3 verbatim (which would define a second method with
+# an identical signature) never happens. The overwrite-warning arm staying at zero
+# is the evidence that it was a relocation.
+factor_pivots(cache::MFLUCache) = cache.ipiv
+factor_pivots(cache::MFLDLTCache) = cache.pivots
+factor_blocks(cache::MFLDLTCache) = cache.blocks
+
+# The third part of IP-3 is genuinely ADDITIVE: `factor_inertia` had no method for
+# `MFLDLTCache` at all, which is why the contract layer re-implemented the
+# classification instead of calling it. It delegates to `_ldlt_cache_inertia`
+# (`src/diagnostics.jl`, included later in this file's include order, which is
+# fine: the name is resolved at call time), so the 1x1/2x2 rule keeps exactly one
+# owner instead of two that could drift. Equivalence of the two implementations
+# was measured BEFORE the duplicate was deleted, on a purpose-built fixture family
+# that actually takes 2x2 pivots (M03-F3: random symmetric matrices take none) —
+# 12/12 fixtures agreed, 6 of them exercising the 2x2 branch.
+factor_inertia(cache::MFLDLTCache) = _ldlt_cache_inertia(cache)
+
 factor_kind(::MFRRQRCache) = :rrqr
 factor_status(cache::MFRRQRCache) = cache.status
 factor_matrix(cache::MFRRQRCache) = cache.factors

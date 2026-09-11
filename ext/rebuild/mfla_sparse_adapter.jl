@@ -95,12 +95,26 @@
 #    same size with the same outcome leave every commit marker numerically
 #    identical, so `MFLA.lease_token` is identical and a lease taken against
 #    the first result STILL VALIDATES against the second.  Reproduced live at
-#    MFLA 4c8e351 by `test/rebuild/P02.jl` §3.  The fix is IP-2
-#    (`record_factor_summary!(cache)` at each `factorize!` commit point), which
-#    belongs to I02 and is NOT applied at this revision.  This adapter
-#    therefore calls `MFLA.record_factor_summary!(cache)` itself at every
-#    attempt boundary — success AND failure — so the guarantee holds for
-#    callers of THIS adapter without IP-2.  See `adapter_refactor!`.
+#    MFLA 4c8e351 by `test/rebuild/P02.jl` §3.
+#
+#    IP-2 (I02) is the fix — `record_factor_summary!(cache)` at each `factorize!`
+#    commit point — and it IS applied now (MFLA 9bd2199 + I02).  This paragraph
+#    used to say it was not.  Corrected at I02: a comment shipped in a tree that
+#    states the opposite of that tree's revision is a defect in its own right.
+#
+#    THE ADAPTER'S OWN BOUNDARY CALL IS STILL REQUIRED, and that is measured
+#    rather than argued (rebuild-reports/I02/logs/adapter_generation_interaction.log).
+#    IP-2's four call sites are all in `src/factor_caches.jl` — the DENSE caches.
+#    `MFSparseLDLCache.factorize!` is the method at
+#    `ext/MultiFloatQDLDLExt.jl:160`, which IP-2 does NOT instrument, so on the
+#    path THIS adapter drives, IP-2 advances nothing.  Measured: one adapter
+#    attempt advances the generation by 1 (this adapter's own call), while a
+#    direct `MFLA.factorize!` on the sparse cache advances it by 0 — i.e. the
+#    M01-F4 gap is still open for direct sparse callers, and this adapter's
+#    boundary call is the only thing that closes it for its own.
+#    It is NOT redundant with IP-2 and NOT merely defensive: it is the half IP-2
+#    does not cover.  See `adapter_refactor!`, and the open finding in
+#    `rebuild-reports/I02/report.json` recording the uncovered sparse path.
 #
 # 4. NO PRECISION DOWNGRADE, NO DENSE CONVERSION.  Every entry point is
 #    parametric in the cache's own `{MF,Ti}` and refuses a value matrix whose

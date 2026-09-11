@@ -146,78 +146,23 @@ end
 # computed once, here, and never again by an accessor.
 _has_inertia(kind::Symbol) = kind === :ldlt || kind === :sparse_ldlt
 
-# Gap in the existing public API, worked around here rather than patched into
-# existing source (M01 may not edit it):
-#   `factor_pivots`/`factor_blocks` have methods for the standalone factors
-#   (`MFLU`, `MFLDLT`) but NOT for the caches, even though `MFLUCache` /
-#   `MFLDLTCache` own exactly the vectors those accessors are meant to expose.
-#   Without these two methods a summary of a cache cannot carry its pivots or
-#   its block grammar. Reported as an open finding; the durable fix belongs in
-#   `src/factor_cache_defs.jl` at integration time.
-factor_pivots(cache::MFLUCache) = cache.ipiv
-factor_pivots(cache::MFLDLTCache) = cache.pivots
-factor_blocks(cache::MFLDLTCache) = cache.blocks
+# I02 / M01 IP-3, RELOCATED. The three cache accessors that used to stand here
+# (`factor_pivots(::MFLUCache)`, `factor_pivots(::MFLDLTCache)`,
+# `factor_blocks(::MFLDLTCache)`) now live in `src/factor_cache_defs.jl`, which is
+# where this comment always said the durable fix belonged. They were MOVED rather
+# than added: a second definition with an identical signature would be a method
+# overwrite, and the overwrite-warning arm is checked on this move for exactly
+# that reason.
+#
+# The local re-implementation of the inertia rule (`_cache_block_inertia_1x1`,
+# `_cache_block_inertia_2x2`, `cache_inertia`) is deleted with them, so the
+# summary path now exercises the real `factor_inertia(::MFLDLTCache)` accessor
+# instead of a private copy that could drift from it. Deleting a second
+# implementation of a numeric classification is only safe if the two agree, so
+# they were compared first, on a fixture family built to take 2x2 pivots: 12/12
+# fixtures agreed, 6 of them exercising the 2x2 branch (see
+# `rebuild-reports/I02/logs/ip3_equivalence.log`).
 
-# Third instance of the same gap: `factor_inertia` has a method for `MFLDLT`
-# only, while `src/diagnostics.jl` keeps a private `_ldlt_cache_inertia`. The
-# contract layer spells the classification out from the cache's own `factors`,
-# `dsub`, and `blocks` so it does not depend on a private helper. The 2x2 rule
-# is the standard Bunch-Kaufman classification by determinant and trace sign.
-function _cache_block_inertia_1x1(value)
-    if value > zero(value)
-        return (1, 0, 0)
-    elseif value < zero(value)
-        return (0, 1, 0)
-    end
-    return (0, 0, 1)
-end
-
-function _cache_block_inertia_2x2(d11::MultiFloat, d21::MultiFloat, d22::MultiFloat)
-    scale = max(abs(d11), abs(d21), abs(d22))
-    iszero(scale) && return (0, 0, 2)
-    a = d11 / scale
-    b = d21 / scale
-    c = d22 / scale
-    determinant = a * c - b * b
-    determinant < zero(determinant) && return (1, 1, 0)
-    trace = a + c
-    if determinant > zero(determinant)
-        return trace > zero(trace) ? (2, 0, 0) : (0, 2, 0)
-    end
-    return trace > zero(trace) ? (1, 0, 1) :
-           trace < zero(trace) ? (0, 1, 1) : (0, 0, 2)
-end
-
-"""
-    cache_inertia(cache::MFLDLTCache) -> NamedTuple
-
-The cache equivalent of [`factor_inertia`](@ref). O(n) over the recorded block
-grammar; called once when a summary is recorded, never by an accessor.
-"""
-function cache_inertia(cache::MFLDLTCache)
-    positive = 0
-    negative = 0
-    zero_count = 0
-    k = 1
-    @inbounds while k <= length(cache.blocks)
-        block = cache.blocks[k]
-        if block == UInt8(1)
-            pos, neg, zer = _cache_block_inertia_1x1(cache.factors[k, k])
-            k += 1
-        elseif block == UInt8(2) && k < length(cache.blocks)
-            pos, neg, zer = _cache_block_inertia_2x2(
-                cache.factors[k, k], cache.dsub[k], cache.factors[k + 1, k + 1],
-            )
-            k += 2
-        else
-            break
-        end
-        positive += pos
-        negative += neg
-        zero_count += zer
-    end
-    return (positive=positive, negative=negative, zero=zero_count)
-end
 
 function _capture_inertia_for(x, kind::Symbol)
     _has_inertia(kind) || return nothing
@@ -236,7 +181,7 @@ end
 _dense_ldlt_inertia(x) = factor_inertia(x)
 _inertia_source(::Any) = nothing
 _inertia_source(x::AbstractMFFactorization) = _dense_ldlt_inertia(x)
-_inertia_source(cache::MFLDLTCache) = cache_inertia(cache)
+_inertia_source(cache::MFLDLTCache) = factor_inertia(cache)
 
 """
     provider_inertia(x) -> Union{Nothing,NamedTuple}
