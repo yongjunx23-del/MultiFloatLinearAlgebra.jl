@@ -57,8 +57,8 @@ function factorize!(
     # M01 IP-2: advance the contract generation at the commit boundary, so a
     # same-size refactor cannot leave the previous commit marker intact
     # (M01-F4 measured the token 0xf8992a5a195d3494 surviving an identical
-    # refactor).  Allocation-free; the summary is recorded before the bump.
-    record_factor_summary!(cache)
+    # refactor). Callers record owned summaries explicitly when needed.
+    bump_generation!(cache)
     check && !iszero(status) && throw(_cholesky_exception(status))
     return cache
 end
@@ -163,8 +163,9 @@ function factorize!(
     end
     status = _lu_factorize_core_viewfree!(cache.factors, cache.ipiv, config, false)
     cache.status = status
-    # M01 IP-2, LU cache.
-    record_factor_summary!(cache)
+    # End earlier leases without constructing an unused pivot/grammar snapshot.
+    # Callers that need an owned report use factor_summary explicitly.
+    bump_generation!(cache)
     check && !iszero(status) && throw(LinearAlgebra.SingularException(status))
     return cache
 end
@@ -281,7 +282,7 @@ function factorize!(
     # M01 IP-2, LDLT cache.  NOTE: this site assigns `info`, not `status`, so a
     # search for `cache.status = status` finds THREE commit points and misses
     # this one -- which is the kind M01-F4 measured.  All four kinds need it.
-    record_factor_summary!(cache)
+    bump_generation!(cache)
     check && !iszero(info) && throw(LinearAlgebra.SingularException(info))
     return cache
 end
@@ -513,7 +514,7 @@ function factorize!(
     status = _factorize_rrqr!(cache, false, cache.config.thread_count, config)
     cache.status = status
     # M01 IP-2, RRQR cache.
-    record_factor_summary!(cache)
+    bump_generation!(cache)
     check && !iszero(status) && throw(ArgumentError("rrqr!: input contains non-finite entries"))
     return cache
 end

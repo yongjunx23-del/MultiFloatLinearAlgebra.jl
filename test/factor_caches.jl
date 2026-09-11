@@ -800,3 +800,37 @@ end
         end
     end
 end
+
+@testset "factorize! advances leases without discarding owned summaries" begin
+    for T in (Float64x2, Float64x3, Float64x4)
+        A = Matrix{T}(I, 4, 4)
+        for constructor in (MFCholeskyCache, MFLUCache, MFLDLTCache, MFRRQRCache)
+            cache = constructor(T; config=KernelConfig(thread_count=1))
+            prepare!(cache, 4)
+            factorize!(cache, A)
+            lease = MFLA.take_lease(cache)
+            summary = MFLA.factor_summary(cache)
+            before = MFLA.generation(cache)
+            factorize!(cache, A)
+            @test MFLA.generation(cache) == before + 1
+            @test MFLA.lease_token(cache) != lease.token
+            @test !MFLA.summary_valid_for(summary, cache)
+            @test MFLA.summary_generation(summary) == before
+            @test MFLA.summary_success(summary)
+            # Explicit recording retains the public snapshot-and-bump contract.
+            recorded = MFLA.record_factor_summary!(cache)
+            @test MFLA.summary_generation(recorded) == before + 1
+            @test MFLA.generation(cache) == before + 2
+            if constructor !== MFRRQRCache
+                lease = MFLA.take_lease(cache)
+                before = MFLA.generation(cache)
+                factorize!(cache, zeros(T, 4, 4); check=false)
+                @test !issuccess(cache)
+                @test MFLA.generation(cache) == before + 1
+                @test MFLA.lease_token(cache) != lease.token
+                @test MFLA.summary_success(summary)
+            end
+            MFLA.forget_generation!(cache)
+        end
+    end
+end

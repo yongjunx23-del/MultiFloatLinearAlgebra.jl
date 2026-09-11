@@ -161,6 +161,9 @@ function MFLA.factorize!(
     cache::MFSparseLDLCache{MF,Ti}, A::SparseMatrixCSC{MF,Ti};
     check::Bool=true,
 ) where {MF<:MultiFloat,Ti<:Integer}
+    # Every attempt ends the previous lease, including validation rejection
+    # and throwing numerical failure. Do not allocate an unused summary.
+    MFLA.bump_generation!(cache)
     _revoke_factor!(cache)
     try
         _validate_numeric(cache, A)

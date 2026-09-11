@@ -140,3 +140,34 @@ end
         end
     end
 end
+
+@testset "sparse factorization attempts revoke old leases" begin
+    const_api = MultiFloatLinearAlgebra
+    for T in (Float64x2, Float64x4)
+        A = _qdldl_upper(T)
+        cache = sparse_ldlt_cache(T, A; dsigns=Int[1, -1, -1])
+        for check in (false, true), outcome in (:success, :nonfinite, :pattern, :singular)
+            factorize!(cache, A)
+            lease = const_api.take_lease(cache)
+            epoch = const_api.generation(cache)
+            candidate = copy(A)
+            if outcome === :nonfinite
+                candidate.nzval[1] = T(NaN)
+            elseif outcome === :pattern
+                candidate.rowval[2] = 2
+            elseif outcome === :singular
+                fill!(candidate.nzval, zero(T))
+            end
+            if check && outcome !== :success
+                @test_throws Exception factorize!(cache, candidate; check=check)
+            else
+                factorize!(cache, candidate; check=check)
+            end
+            @test const_api.generation(cache) == epoch + 1
+            @test !const_api.validate_lease(cache, lease)
+            @test const_api.lease_token(cache) != lease.token
+            @test const_api.issuccess(cache) == (outcome === :success)
+        end
+        const_api.forget_generation!(cache)
+    end
+end

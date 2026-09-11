@@ -102,19 +102,12 @@
 #    used to say it was not.  Corrected at I02: a comment shipped in a tree that
 #    states the opposite of that tree's revision is a defect in its own right.
 #
-#    THE ADAPTER'S OWN BOUNDARY CALL IS STILL REQUIRED, and that is measured
-#    rather than argued (rebuild-reports/I02/logs/adapter_generation_interaction.log).
-#    IP-2's four call sites are all in `src/factor_caches.jl` — the DENSE caches.
-#    `MFSparseLDLCache.factorize!` is the method at
-#    `ext/MultiFloatQDLDLExt.jl:160`, which IP-2 does NOT instrument, so on the
-#    path THIS adapter drives, IP-2 advances nothing.  Measured: one adapter
-#    attempt advances the generation by 1 (this adapter's own call), while a
-#    direct `MFLA.factorize!` on the sparse cache advances it by 0 — i.e. the
-#    M01-F4 gap is still open for direct sparse callers, and this adapter's
-#    boundary call is the only thing that closes it for its own.
-#    It is NOT redundant with IP-2 and NOT merely defensive: it is the half IP-2
-#    does not cover.  See `adapter_refactor!`, and the open finding in
-#    `rebuild-reports/I02/report.json` recording the uncovered sparse path.
+#    R8 instruments direct sparse factorize! at attempt entry. A call reaching
+#    the provider now advances its generation once; this adapter records its
+#    own boundary afterwards, for a total delta of two. Adapter-side preflight
+#    rejections still need their own boundary because no provider call occurs.
+#    Consumers compare epochs for equality, never assume unit increments.
+
 #
 # 4. NO PRECISION DOWNGRADE, NO DENSE CONVERSION.  Every entry point is
 #    parametric in the cache's own `{MF,Ti}` and refuses a value matrix whose
@@ -640,11 +633,11 @@ Ordering, and every step is load-bearing:
      is a *status* under the contract, and this adapter turns a non-success
      status into a refusal so the caller cannot proceed on a dead factor.
   5. `MFLA.record_factor_summary!(a.cache)` runs at the attempt boundary,
-     success or failure.  It records the O(1) summary and bumps the package's
-     generation, which is what makes a lease taken against the previous result
-     stop validating.  **This is IP-2 performed adapter-side**; see the header.
-     Without it the M01-F4 measurements in `test/rebuild/P02.jl` §3 show the
-     old lease surviving a same-size refactor.
+     success or failure. It records an owned summary and advances the package's
+     generation. Adapter-side preflight refusals do not call the provider, so
+     their boundary still needs this update. A call reaching sparse factorize!
+     has already advanced the provider generation once, giving delta two in
+     total. Lease consumers require equality, not a particular increment.
 
 `checked=false` skips step 2's pattern derivation and step 3's type comparison.
 It is NOT a way to refactor a changed pattern — it is the exclusive hot entry

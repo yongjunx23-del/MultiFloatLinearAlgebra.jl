@@ -489,7 +489,7 @@ function p02_leg_routes(api, mode::Symbol)
     nothing
 end
 
-"Leg 2 — M01-F4 AT PACKAGE LEVEL: a same-outcome refactor leaves the commit markers identical."
+"Leg 2 — M01-F4 regression: a same-outcome refactor ends the previous lease."
 function p02_leg_m01f4(api, mode::Symbol)
     rec(key, value) = p02_rec!(mode, key, value)
     pattern = p02_upper_csc(MF2, p02_operator(MF2))
@@ -520,19 +520,17 @@ function p02_leg_m01f4(api, mode::Symbol)
     rec(:f4_first_lease_still_validates, still_valid)
     rec(:f4_numeric_count, api.numeric_count(
         api.P02SparseAdapter(cache, false, 0, 0, false, 0, UInt64(0), 1, 0)))
-    # THE MEASUREMENT, asserted as measured: with no attempt boundary the
-    # provider's commit markers cannot tell the two factorizations apart, and a
-    # lease taken against the FIRST still validates against the SECOND.
-    @test token1 == token2
-    @test epoch2 == epoch1
-    @test still_valid == true
+    # The provider now revokes directly; no adapter is needed for freshness.
+    @test token1 != token2
+    @test epoch2 == epoch1 + 1
+    @test still_valid == false
 
     # The IP-2 call is what moves it, measured on the same cache object.
     summary = MFLA.record_factor_summary!(cache)
     rec(:f4_generation_after_record, Int(MFLA.generation(cache)))
     rec(:f4_lease_valid_after_record, MFLA.validate_lease(cache, lease1))
     rec(:f4_summary_kind, string(summary.kind))
-    @test MFLA.generation(cache) == epoch1 + 1
+    @test MFLA.generation(cache) == epoch2 + 1
     @test MFLA.validate_lease(cache, lease1) == false
     nothing
 end
