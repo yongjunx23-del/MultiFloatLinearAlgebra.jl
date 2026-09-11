@@ -142,3 +142,36 @@ end
         return acc + x * y
     end
 end
+
+# Packed-GEMM accumulation. The packed path must remain bitwise-identical to
+# the direct reference path, so only networks with that property may fuse
+# here: x3 unconditionally, x4 behind the same Apple compile-time gate as the
+# structured route. The x2 operand-relative network is deliberately absent —
+# it would break the packed == direct calibration check.
+@inline function _packed_mulacc(
+    acc::MultiFloatVec{4,T,N},
+    x::MultiFloatVec{4,T,N},
+    y::MultiFloatVec{4,T,N},
+) where {T,N}
+    return acc + x * y
+end
+
+@inline function _packed_mulacc(
+    acc::MultiFloatVec{4,Float64,3},
+    x::MultiFloatVec{4,Float64,3},
+    y::MultiFloatVec{4,Float64,3},
+)
+    return mulacc_x3(acc, x, y)
+end
+
+@inline function _packed_mulacc(
+    acc::MultiFloatVec{4,Float64,4},
+    x::MultiFloatVec{4,Float64,4},
+    y::MultiFloatVec{4,Float64,4},
+)
+    @static if Sys.isapple() && Sys.ARCH === :aarch64
+        return mulacc_x4(acc, x, y)
+    else
+        return acc + x * y
+    end
+end

@@ -22,7 +22,7 @@
             A[row + 3, k],
         )
         offset = (k - 1) * width + local_column
-        accumulator1 += values * V4(packed_b[offset])
+        accumulator1 = _packed_mulacc(accumulator1, values, V4(packed_b[offset]))
     end
     result1 = if OVERWRITE
         V4(alpha) * accumulator1
@@ -65,8 +65,8 @@ end
             A[row + 3, k],
         )
         offset = (k - 1) * width + local_column
-        accumulator1 += values * V4(packed_b[offset])
-        accumulator2 += values * V4(packed_b[offset + 1])
+        accumulator1 = _packed_mulacc(accumulator1, values, V4(packed_b[offset]))
+        accumulator2 = _packed_mulacc(accumulator2, values, V4(packed_b[offset + 1]))
     end
     alpha_vector = V4(alpha)
     beta_vector = V4(beta)
@@ -124,10 +124,10 @@ end
             A[row + 3, k],
         )
         offset = (k - 1) * width + local_column
-        accumulator1 += values * V4(packed_b[offset])
-        accumulator2 += values * V4(packed_b[offset + 1])
-        accumulator3 += values * V4(packed_b[offset + 2])
-        accumulator4 += values * V4(packed_b[offset + 3])
+        accumulator1 = _packed_mulacc(accumulator1, values, V4(packed_b[offset]))
+        accumulator2 = _packed_mulacc(accumulator2, values, V4(packed_b[offset + 1]))
+        accumulator3 = _packed_mulacc(accumulator3, values, V4(packed_b[offset + 2]))
+        accumulator4 = _packed_mulacc(accumulator4, values, V4(packed_b[offset + 3]))
     end
     alpha_vector = V4(alpha)
     beta_vector = V4(beta)
