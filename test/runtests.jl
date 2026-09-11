@@ -2771,14 +2771,31 @@ include("phase5_trsm_threading.jl")
             )
             @test Cfused == Cstandard
 
-            # Fused is x3-only.
+            # x2 fused is an operand-relative opt-in, available only where
+            # `_supports_fused_mulacc` reports measured evidence (Apple silicon
+            # today). Elsewhere it must still throw.
             A2 = Float64x2.(randn(8, 8))
             B2 = Float64x2.(randn(8, 8))
             C2 = zeros(Float64x2, 8, 8)
-            @test_throws ArgumentError MultiFloatLinearAlgebra.gemm!(
-                C2, A2, B2;
-                config=KernelConfig(thread_count=1, gemm_strategy=:fused),
-            )
+            if Sys.isapple() && Sys.ARCH === :aarch64
+                MultiFloatLinearAlgebra.gemm!(
+                    C2, A2, B2;
+                    config=KernelConfig(thread_count=1, gemm_strategy=:fused),
+                )
+                C2ref = zeros(Float64x2, 8, 8)
+                MultiFloatLinearAlgebra.gemm!(
+                    C2ref, A2, B2;
+                    config=KernelConfig(thread_count=1, gemm_strategy=:direct),
+                )
+                # Operand-relative bound: for O(1) inputs the deviation from
+                # the direct path sits at the x2 tail scale (~u^2).
+                @test maximum(abs.(Float64.(C2 .- C2ref))) <= 1e-25
+            else
+                @test_throws ArgumentError MultiFloatLinearAlgebra.gemm!(
+                    C2, A2, B2;
+                    config=KernelConfig(thread_count=1, gemm_strategy=:fused),
+                )
+            end
 
             # :auto routes x3 to fused, while :direct stays the reference path.
             plan_auto = MultiFloatLinearAlgebra.gemm_plan(

@@ -222,7 +222,11 @@ function calibrate_gemm(
 
     measurements = GemmMeasurement[]
     workers = min(max(thread_count, 1), Threads.nthreads())
-    baseline_strategy = _supports_fused_mulacc(MF) ? :fused : :direct
+    # The calibration baseline must be the bitwise-canonical production path —
+    # `_auto_fused_mulacc`, not `_supports_fused_mulacc`: opt-in fused networks
+    # like x2's are only operand-relative and would fail the packed-equality
+    # check below.
+    baseline_strategy = _auto_fused_mulacc(MF) ? :fused : :direct
     for n in tested_sizes
         A = _calibration_matrix(MF, n, 0.1)
         B = _calibration_matrix(MF, n, 0.7)

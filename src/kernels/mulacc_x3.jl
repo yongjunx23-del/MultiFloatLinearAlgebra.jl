@@ -66,7 +66,17 @@ end
 end
 
 _supports_fused_mulacc(::Type{MultiFloat{Float64,3}}) = true
+# x2 fused evidence is Apple silicon only so far; keep the dedicated fused
+# GEMM route off other platforms until cross-platform calibration exists.
+_supports_fused_mulacc(::Type{MultiFloat{Float64,2}}) =
+    Sys.isapple() && Sys.ARCH === :aarch64
 _supports_fused_mulacc(::Type{<:MultiFloat}) = false
+
+# `:auto` may only select fused when the fused network is bitwise-identical
+# to `acc + x*y` — that holds for x3 (and no other width today). The x2 fused
+# network is operand-relative, so it stays opt-in via `gemm_strategy=:fused`.
+_auto_fused_mulacc(::Type{MultiFloat{Float64,3}}) = true
+_auto_fused_mulacc(::Type{<:MultiFloat}) = false
 
 # GEMM arithmetic: the fused Float64x3 direct GEMM uses `mulacc_x3`; every
 # other supported type keeps the standard `acc + x*y` accumulation. GEMM keeps

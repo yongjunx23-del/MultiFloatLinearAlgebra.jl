@@ -31,7 +31,9 @@ Use `calibrate_gemm` to produce a machine-specific profile explicitly.
   otherwise);
 - `:direct` — the standard direct kernel, kept as a reference baseline;
 - `:packed` — the B-panel-packed kernel;
-- `:fused` — the fused Float64x3 direct kernel (x3 only).
+- `:fused` — the fused multiply-accumulate direct kernel (x3 on all
+  platforms; x2 on Apple silicon where the fused network is measured
+  positive).
 
 `gemm_packed_crossover` is expressed as an equivalent square edge length: the
 packed route is eligible once the total `m*k*n` work reaches `crossover^3`, the
@@ -62,7 +64,9 @@ function gemm_plan(
 
     if strategy === :fused
         _supports_fused_mulacc(MF) ||
-            throw(ArgumentError("gemm_strategy=:fused is only available for Float64x3"))
+            throw(ArgumentError(
+                "gemm_strategy=:fused is not available for $MF on this platform",
+            ))
         panel_columns = config.gemm_panel_columns > 0 ?
                         config.gemm_panel_columns :
                         _default_gemm_panel_columns(MF, config.thread_count)
@@ -121,10 +125,14 @@ function gemm_plan(
         :auto_above_crossover
     end
     use_packed = reason === :auto_above_crossover
+    # `:auto` only picks fused for widths whose fused network is bitwise-
+    # identical to `acc + x*y` (`_auto_fused_mulacc`). Widths like x2 whose
+    # fused network is only operand-relative remain reachable via the explicit
+    # `:fused` strategy (`_supports_fused_mulacc`), never implicitly.
     strategy = use_packed ? :packed :
-               _supports_fused_mulacc(MF) ? :fused : :direct
+               _auto_fused_mulacc(MF) ? :fused : :direct
     resolved_reason = use_packed ? reason :
-                      _supports_fused_mulacc(MF) ? :auto_fused_direct : reason
+                      _auto_fused_mulacc(MF) ? :auto_fused_direct : reason
     return GemmPlan(
         strategy,
         resolved_reason,
@@ -307,33 +315,33 @@ end
 # ---------------------------------------------------------------------------
 
 @inline function _gemm_store_pair_fused!(
-    C::AbstractMatrix{MultiFloat{Float64,3}},
-    A::AbstractMatrix{MultiFloat{Float64,3}},
-    B::AbstractMatrix{MultiFloat{Float64,3}},
+    C::AbstractMatrix{MultiFloat{Float64,N}},
+    A::AbstractMatrix{MultiFloat{Float64,N}},
+    B::AbstractMatrix{MultiFloat{Float64,N}},
     row::Int,
     column::Int,
-    alpha::MultiFloat{Float64,3},
-    beta::MultiFloat{Float64,3},
+    alpha::MultiFloat{Float64,N},
+    beta::MultiFloat{Float64,N},
     ::Val{OVERWRITE},
-) where {OVERWRITE}
-    V3 = MultiFloatVec{4,Float64,3}
-    first_accumulator = zero(V3)
-    second_accumulator = zero(V3)
+) where {N,OVERWRITE}
+    VN = MultiFloatVec{4,Float64,N}
+    first_accumulator = zero(VN)
+    second_accumulator = zero(VN)
     @inbounds for k in axes(A, 2)
-        values = V3(
+        values = VN(
             A[row, k],
             A[row + 1, k],
             A[row + 2, k],
             A[row + 3, k],
         )
-        first_accumulator = _gemm_mulacc(first_accumulator, values, V3(B[k, column]))
-        second_accumulator = _gemm_mulacc(second_accumulator, values, V3(B[k, column + 1]))
+        first_accumulator = _gemm_mulacc(first_accumulator, values, VN(B[k, column]))
+        second_accumulator = _gemm_mulacc(second_accumulator, values, VN(B[k, column + 1]))
     end
 
     first_result = if OVERWRITE
-        V3(alpha) * first_accumulator
+        VN(alpha) * first_accumulator
     else
-        V3(alpha) * first_accumulator + V3(beta) * V3(
+        VN(alpha) * first_accumulator + VN(beta) * VN(
             C[row, column],
             C[row + 1, column],
             C[row + 2, column],
@@ -341,9 +349,9 @@ end
         )
     end
     second_result = if OVERWRITE
-        V3(alpha) * second_accumulator
+        VN(alpha) * second_accumulator
     else
-        V3(alpha) * second_accumulator + V3(beta) * V3(
+        VN(alpha) * second_accumulator + VN(beta) * VN(
             C[row, column + 1],
             C[row + 1, column + 1],
             C[row + 2, column + 1],
@@ -358,30 +366,30 @@ end
 end
 
 @inline function _gemm_store_single_fused!(
-    C::AbstractMatrix{MultiFloat{Float64,3}},
-    A::AbstractMatrix{MultiFloat{Float64,3}},
-    B::AbstractMatrix{MultiFloat{Float64,3}},
+    C::AbstractMatrix{MultiFloat{Float64,N}},
+    A::AbstractMatrix{MultiFloat{Float64,N}},
+    B::AbstractMatrix{MultiFloat{Float64,N}},
     row::Int,
     column::Int,
-    alpha::MultiFloat{Float64,3},
-    beta::MultiFloat{Float64,3},
+    alpha::MultiFloat{Float64,N},
+    beta::MultiFloat{Float64,N},
     ::Val{OVERWRITE},
-) where {OVERWRITE}
-    V3 = MultiFloatVec{4,Float64,3}
-    accumulator = zero(V3)
+) where {N,OVERWRITE}
+    VN = MultiFloatVec{4,Float64,N}
+    accumulator = zero(VN)
     @inbounds for k in axes(A, 2)
-        values = V3(
+        values = VN(
             A[row, k],
             A[row + 1, k],
             A[row + 2, k],
             A[row + 3, k],
         )
-        accumulator = _gemm_mulacc(accumulator, values, V3(B[k, column]))
+        accumulator = _gemm_mulacc(accumulator, values, VN(B[k, column]))
     end
     result = if OVERWRITE
-        V3(alpha) * accumulator
+        VN(alpha) * accumulator
     else
-        V3(alpha) * accumulator + V3(beta) * V3(
+        VN(alpha) * accumulator + VN(beta) * VN(
             C[row, column],
             C[row + 1, column],
             C[row + 2, column],
@@ -395,16 +403,16 @@ end
 end
 
 function _gemm_direct_column_range_fused!(
-    C::AbstractMatrix{MultiFloat{Float64,3}},
-    A::AbstractMatrix{MultiFloat{Float64,3}},
-    B::AbstractMatrix{MultiFloat{Float64,3}},
-    alpha::MultiFloat{Float64,3},
-    beta::MultiFloat{Float64,3},
+    C::AbstractMatrix{MultiFloat{Float64,N}},
+    A::AbstractMatrix{MultiFloat{Float64,N}},
+    B::AbstractMatrix{MultiFloat{Float64,N}},
+    alpha::MultiFloat{Float64,N},
+    beta::MultiFloat{Float64,N},
     first_column::Int,
     last_column::Int,
     overwrite::Val{OVERWRITE},
-) where {OVERWRITE}
-    MF3 = MultiFloat{Float64,3}
+) where {N,OVERWRITE}
+    MF3 = MultiFloat{Float64,N}
     m = size(A, 1)
     column = first_column
 
@@ -455,13 +463,13 @@ function _gemm_direct_column_range_fused!(
 end
 
 function _gemm_direct_fused!(
-    C::AbstractMatrix{MultiFloat{Float64,3}},
-    A::AbstractMatrix{MultiFloat{Float64,3}},
-    B::AbstractMatrix{MultiFloat{Float64,3}},
-    alpha::MultiFloat{Float64,3},
-    beta::MultiFloat{Float64,3},
+    C::AbstractMatrix{MultiFloat{Float64,N}},
+    A::AbstractMatrix{MultiFloat{Float64,N}},
+    B::AbstractMatrix{MultiFloat{Float64,N}},
+    alpha::MultiFloat{Float64,N},
+    beta::MultiFloat{Float64,N},
     plan::GemmPlan,
-)
+) where {N}
     n = size(B, 2)
     jobs = cld(n, plan.panel_columns)
     workers = plan.workers
