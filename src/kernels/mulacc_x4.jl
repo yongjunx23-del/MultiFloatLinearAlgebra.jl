@@ -104,3 +104,19 @@ end
     return _raw_mfadd4(a0, a1, a2, a3, p0, p1, p2, p3)
 end
 
+
+# Fused x4 is bitwise-identical to `acc + x*y` (adversarial differential
+# suite above) but positive performance evidence is Apple silicon only, so
+# both the explicit `:fused` route and `:auto` stay gated to it.
+_supports_fused_mulacc(::Type{MultiFloat{Float64,4}}) =
+    Sys.isapple() && Sys.ARCH === :aarch64
+_auto_fused_mulacc(::Type{MultiFloat{Float64,4}}) =
+    Sys.isapple() && Sys.ARCH === :aarch64
+
+@inline function _gemm_mulacc(
+    acc::MultiFloatVec{4,Float64,4},
+    x::MultiFloatVec{4,Float64,4},
+    y::MultiFloatVec{4,Float64,4},
+)
+    return mulacc_x4(acc, x, y)
+end

@@ -444,7 +444,10 @@ include("phase5_trsm_threading.jl")
             end
 
             @testset "near-square auto policy" begin
-                fused_default = T === Float64x3
+                # Auto selects fused exactly where `_auto_fused_mulacc` says
+                # the fused network is bitwise-identical with positive
+                # platform evidence — x3 everywhere, x4 on Apple silicon.
+                fused_default = MultiFloatLinearAlgebra._auto_fused_mulacc(T)
                 profile = GemmProfile{T}(
                     :auto,
                     16,
